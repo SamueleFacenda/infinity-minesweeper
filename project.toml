@@ -1,0 +1,59 @@
+# Project Configuration
+# This file defines project-specific settings for AI agents
+
+[project]
+name = "infinite-minesweeper"
+description = "Infinite minesweeper webapp with no-guess boards"
+license = "EUPL-1.2"
+version = "0.1.0"
+repository = "https://github.com/samu/infinite-minesweeper"
+
+[languages]
+rust = false
+python = false
+nodejs = true
+
+[ai_agents]
+# OpenRouter only - no other providers
+openrouter.base_url = "https://openrouter.ai/api/v1"
+# API key should be set via OPENROUTER_API_KEY env var (sops/age encrypted)
+openrouter.models.fast = "deepseek/deepseek-chat-v3-0324:free"
+openrouter.models.smart = "google/gemini-2.5-flash"
+openrouter.models.reasoning = "openai/gpt-5"
+
+# Token optimization
+token_optimizer.enabled = true
+token_optimizer.headroom_proxy = "http://localhost:8787"
+token_optimizer.output_shaper = true
+
+# Memory configuration
+memory.global_path = "~/.config/ai-memory"
+memory.project_path = ".ai-memory"
+memory.harness_db = ".ai-memory/harness-memory.db"
+memory.lemma_db = ".ai-memory/lemma.db"
+memory.honcho_uri = "http://localhost:24843"
+
+[lsp]
+# Language servers (auto-configured via nix)
+servers = [
+  "typescript-language-server",
+  "nil",
+  "marksman",
+  "vscode-langservers-extracted",
+  "taplo"
+]
+
+[hooks]
+pre_commit = true
+commit_msg = true
+pre_push = false
+
+[security]
+semgrep = true
+trivy = true
+git_secrets = true
+npm_audit = true
+
+[docker]
+enabled = false
+registry = "ghcr.io"

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Infinite Minesweeper</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="hud">
+      <h1>Minesweeper<span class="accent">∞</span></h1>
+      <label class="hud-label">
+        Difficulty
+        <select id="difficulty" aria-label="Difficulty"></select>
+      </label>
+      <div class="hud-stats">
+        <span id="stat-flags">Flags 0</span>
+        <span id="stat-cleared">Cleared 0</span>
+        <span id="stat-time">0:00</span>
+      </div>
+      <div class="hud-actions">
+        <button id="btn-hint" type="button">Hint</button>
+        <button id="btn-leaderboard" type="button">Leaderboard</button>
+        <button id="btn-new" type="button" class="primary">New game</button>
+      </div>
+    </header>
+    <main>
+      <canvas id="board-canvas"></canvas>
+    </main>
+    <div id="toast" class="toast hidden"></div>
+    <div id="overlay" class="overlay hidden">
+      <div class="overlay-card">
+        <h2 id="overlay-title"></h2>
+        <p id="overlay-text"></p>
+        <button id="overlay-action" type="button" class="primary">
+          New game
+        </button>
+      </div>
+    </div>
+    <div id="leaderboard-modal" class="modal hidden">
+      <div class="modal-card">
+        <h2>Leaderboard</h2>
+        <div id="modal-boards" class="modal-boards"></div>
+        <button id="modal-close" type="button" class="primary">Close</button>
+      </div>
+    </div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

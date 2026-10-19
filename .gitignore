@@ -1,0 +1,36 @@
+# Build artifacts
+dist/
+node_modules/
+*.tsbuildinfo
+
+# Nix
+result
+result-*
+
+# Direnv
+.direnv/
+.envrc.local
+
+# Environment
+.env
+.env.local
+
+# AI tooling
+.ai-memory/
+.claude/
+.opencode/
+.playwright-mcp/
+*.db
+*.db-journal
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# Logs
+*.log
+
+# OS
+.DS_Store

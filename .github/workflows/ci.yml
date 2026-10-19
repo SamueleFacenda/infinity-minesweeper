@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  NIX_CONFIG: |
+    experimental-features = nix-command flakes
+    accept-flake-config = true
+
+jobs:
+  checks:
+    name: Nix flake checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+
+      - name: Run flake checks
+        run: nix flake check --show-trace
+
+      - name: Run pre-commit
+        run: nix run .#pre-commit-run
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: checks
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Install dependencies and verify
+        run: |
+          nix develop -c bash -c '
+            npm ci
+            npm run typecheck
+            npm run lint
+            npm test
+          '

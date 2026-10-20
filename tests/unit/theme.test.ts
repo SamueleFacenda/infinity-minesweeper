@@ -112,6 +112,7 @@ describe("applyTheme", () => {
     const storage = new MemoryStorage();
     applyTheme("charcoal", "#d08770", stubDocument(), storage);
     expect(canvasPalette().background).toBe(THEMES.charcoal.canvas.background);
+    expect(canvasPalette().hidden).toBe("#d08770");
     expect(accentColor()).toBe("#d08770");
     expect(loadThemeSettings(storage)).toEqual({
       theme: "charcoal",
@@ -119,6 +120,7 @@ describe("applyTheme", () => {
     });
     applyTheme("nord", "#88c0d0", stubDocument(), new MemoryStorage());
     expect(canvasPalette().background).toBe(THEMES.nord.canvas.background);
+    expect(canvasPalette().hidden).toBe("#88c0d0");
   });
 
   it("falls back to the theme default for an invalid accent", () => {

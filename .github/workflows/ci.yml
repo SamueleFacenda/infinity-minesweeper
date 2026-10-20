@@ -33,7 +33,7 @@ jobs:
         run: nix flake check --show-trace
 
       - name: Run pre-commit
-        run: nix run .#pre-commit-run
+        run: nix develop -c nix fmt
 
   test:
     name: Tests

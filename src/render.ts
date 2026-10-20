@@ -20,7 +20,7 @@ const MIN_CORNER_RADIUS = 1;
 // between sheet rects when the camera sits on fractional coordinates
 const SHEET_OVERDRAW_PX = 0.5;
 
-const REVEAL_DURATION_MS = 600;
+const REVEAL_DURATION_MS = 300;
 const REVEAL_STAGGER_MS = 50;
 const FLAG_ANIMATION_MS = 260;
 const LOSS_RING_MS = 1200;

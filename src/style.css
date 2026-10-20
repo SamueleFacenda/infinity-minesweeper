@@ -1,11 +1,15 @@
 :root {
   color-scheme: dark;
-  --bg: #0b1120;
-  --panel: #16213a;
-  --panel-border: #293b5e;
-  --text: #e2e8f0;
-  --muted: #94a3b8;
-  --accent: #38bdf8;
+  --bg: #2e3440;
+  --panel: #3b4252;
+  --panel-border: #4c566a;
+  --text: #eceff4;
+  --muted: #d8dee9;
+  --accent: #88c0d0;
+  --button: #434c5e;
+  --button-hover: #4c566a;
+  --button-border-hover: #5c6a80;
+  --primary-text: #2e3440;
 }
 
 * {
@@ -67,43 +71,86 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.hud-theme {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
 .hud-actions {
   display: flex;
   gap: 0.5rem;
-  margin-left: auto;
 }
 
 button {
   font: inherit;
   font-size: 0.85rem;
   color: var(--text);
-  background: #1e293b;
+  background: var(--button);
   border: 1px solid var(--panel-border);
   border-radius: 8px;
   padding: 0.4rem 0.85rem;
   cursor: pointer;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease;
 }
 
 button:hover {
-  background: #263549;
-  border-color: #3d5378;
+  background: var(--button-hover);
+  border-color: var(--button-border-hover);
 }
 
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #08203a;
+  color: var(--primary-text);
   font-weight: 600;
 }
 
 button.primary:hover {
-  background: #5cc8fa;
+  background: color-mix(in oklab, var(--accent) 82%, white);
+  border-color: color-mix(in oklab, var(--accent) 82%, white);
+}
+
+button:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.accent-dots {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.accent-dot {
+  width: 1.15rem;
+  height: 1.15rem;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgb(255 255 255 / 0.25);
+  transition:
+    transform 150ms ease,
+    outline-color 150ms ease;
+}
+
+.accent-dot:hover {
+  transform: scale(1.2);
+}
+
+.accent-dot.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 select {
   font: inherit;
   color: var(--text);
-  background: #1e293b;
+  background: var(--button);
   border: 1px solid var(--panel-border);
   border-radius: 8px;
   padding: 0.35rem 0.5rem;
@@ -139,6 +186,10 @@ main {
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.4);
 }
 
+.toast:not(.hidden) {
+  animation: toast-in 200ms ease-out;
+}
+
 .overlay,
 .modal {
   position: fixed;
@@ -146,8 +197,13 @@ main {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgb(4 10 22 / 0.7);
+  background: rgb(0 0 0 / 0.55);
   backdrop-filter: blur(4px);
+}
+
+.overlay:not(.hidden),
+.modal:not(.hidden) {
+  animation: fade-in 180ms ease-out;
 }
 
 .overlay-card,
@@ -159,6 +215,7 @@ main {
   text-align: center;
   min-width: 18rem;
   box-shadow: 0 16px 48px rgb(0 0 0 / 0.5);
+  animation: card-in 250ms ease-out;
 }
 
 .overlay-card h2,
@@ -200,12 +257,45 @@ main {
   color: var(--muted);
 }
 
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(0.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
 @media (max-width: 720px) {
   .hud {
     gap: 0.6rem;
   }
 
-  .hud-actions {
+  .hud-theme {
     margin-left: 0;
   }
 

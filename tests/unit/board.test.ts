@@ -101,6 +101,18 @@ describe("board", () => {
     expect(board.clickNumber(zero.x, zero.y)).toBe("ok");
     expect(board.revealedCount).toBe(before);
   });
+
+  it("clears the last changed-cell batches on no-op clicks", () => {
+    const board = new Board(42, 0.12);
+    board.reveal(0, 0);
+    expect(board.lastRevealed.length).toBeGreaterThan(0);
+    board.reveal(0, 0);
+    expect(board.lastRevealed).toEqual([]);
+    expect(board.lastFlagged).toEqual([]);
+    board.clickNumber(900, -900);
+    expect(board.lastRevealed).toEqual([]);
+    expect(board.lastFlagged).toEqual([]);
+  });
 });
 
 function findChordTarget(board: Board): [number, number, number] | null {

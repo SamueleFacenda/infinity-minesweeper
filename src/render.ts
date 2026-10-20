@@ -1,37 +1,44 @@
 import type { Board } from "./game/board.js";
 import type { Cell } from "./game/coords.js";
+import { keyOf } from "./game/coords.js";
+import { accentColor, canvasPalette } from "./theme.js";
 
 // Canvas renderer for a window of the infinite board. Camera keeps world
 // coordinates (cell units) of the viewport center; cells draw flat with
-// rounded corners for a modern look.
-
-const COLORS = {
-  background: "#0b1120",
-  hidden: "#334155",
-  hiddenHover: "#475569",
-  revealed: "#1e293b",
-  grid: "#0b1120",
-  flag: "#f59e0b",
-  flagPole: "#e2e8f0",
-  mine: "#fca5a5",
-  exploded: "#dc2626",
-  hint: "#facc15",
-  numbers: [
-    "#60a5fa",
-    "#34d399",
-    "#f87171",
-    "#c084fc",
-    "#fbbf24",
-    "#22d3ee",
-    "#f472b6",
-    "#e2e8f0",
-  ] as const,
-};
+// rounded corners for a modern look. Cell state changes animate through
+// per-cell records replayed by a requestAnimationFrame loop that only runs
+// while animations are pending.
 
 const MIN_CELL_SIZE = 14;
 const MAX_CELL_SIZE = 56;
 const CELL_GAP = 1;
 const CORNER_RADIUS = 3;
+
+const REVEAL_DURATION_MS = 200;
+const REVEAL_STAGGER_MS = 14;
+const FLAG_ANIMATION_MS = 260;
+const LOSS_RING_MS = 650;
+
+interface RevealAnimation {
+  readonly startTime: number;
+  readonly delay: number;
+}
+
+interface FlagAnimation {
+  readonly placing: boolean;
+  readonly startTime: number;
+}
+
+interface LossAnimation {
+  readonly cell: Cell;
+  readonly startTime: number;
+}
+
+interface FlagRaiseState {
+  readonly pole: number;
+  readonly pennant: number;
+  readonly alpha: number;
+}
 
 export class Renderer {
   cellSize = 30;
@@ -39,6 +46,14 @@ export class Renderer {
   cameraY = 0;
   hintCell: Cell | null = null;
   hoverCell: Cell | null = null;
+
+  private readonly revealAnims = new Map<string, RevealAnimation>();
+  private readonly flagAnims = new Map<string, FlagAnimation>();
+  private lossAnim: LossAnimation | null = null;
+  private animFrame: number | null = null;
+  private readonly reducedMotion = window.matchMedia(
+    "(prefers-reduced-motion: reduce)",
+  ).matches;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -50,6 +65,9 @@ export class Renderer {
     this.board = board;
     this.hintCell = null;
     this.hoverCell = null;
+    this.revealAnims.clear();
+    this.flagAnims.clear();
+    this.lossAnim = null;
   }
 
   resize(): void {
@@ -62,7 +80,8 @@ export class Renderer {
   draw(): void {
     const width = this.canvas.clientWidth;
     const height = this.canvas.clientHeight;
-    this.ctx.fillStyle = COLORS.background;
+    const palette = canvasPalette();
+    this.ctx.fillStyle = palette.background;
     this.ctx.fillRect(0, 0, width, height);
     const originX = Math.floor(this.cameraX - width / (2 * this.cellSize));
     const originY = Math.floor(this.cameraY - height / (2 * this.cellSize));
@@ -73,6 +92,44 @@ export class Renderer {
         this.drawCell(cx, cy);
       }
     }
+    this.drawLossRing();
+  }
+
+  animateReveal(cells: readonly (readonly [number, number])[], origin: Cell) {
+    if (this.reducedMotion) return;
+    const startTime = performance.now();
+    for (const [x, y] of cells) {
+      const distance = Math.max(Math.abs(x - origin.x), Math.abs(y - origin.y));
+      this.revealAnims.set(keyOf(x, y), {
+        startTime,
+        delay: distance * REVEAL_STAGGER_MS,
+      });
+    }
+    this.scheduleAnimationLoop();
+  }
+
+  animateFlagRaise(cells: readonly (readonly [number, number])[]) {
+    if (this.reducedMotion) return;
+    const startTime = performance.now();
+    for (const [x, y] of cells) {
+      this.flagAnims.set(keyOf(x, y), { placing: true, startTime });
+    }
+    this.scheduleAnimationLoop();
+  }
+
+  animateFlagToggle(cell: Cell, placing: boolean) {
+    if (this.reducedMotion) return;
+    this.flagAnims.set(keyOf(cell.x, cell.y), {
+      placing,
+      startTime: performance.now(),
+    });
+    this.scheduleAnimationLoop();
+  }
+
+  animateLoss(cell: Cell) {
+    if (this.reducedMotion) return;
+    this.lossAnim = { cell, startTime: performance.now() };
+    this.scheduleAnimationLoop();
   }
 
   screenToCell(px: number, py: number): Cell {
@@ -105,15 +162,59 @@ export class Renderer {
     this.cameraY = cell.y;
   }
 
+  private scheduleAnimationLoop(): void {
+    if (this.reducedMotion || this.animFrame !== null) return;
+    this.animFrame = requestAnimationFrame(() => {
+      this.animFrame = null;
+      this.pruneAnimations(performance.now());
+      if (
+        this.revealAnims.size === 0 &&
+        this.flagAnims.size === 0 &&
+        this.lossAnim === null
+      ) {
+        return;
+      }
+      this.draw();
+      this.scheduleAnimationLoop();
+    });
+  }
+
+  private pruneAnimations(now: number): void {
+    for (const [key, anim] of this.revealAnims) {
+      if (now - anim.startTime - anim.delay >= REVEAL_DURATION_MS) {
+        this.revealAnims.delete(key);
+      }
+    }
+    for (const [key, anim] of this.flagAnims) {
+      if (now - anim.startTime >= FLAG_ANIMATION_MS) {
+        this.flagAnims.delete(key);
+      }
+    }
+    if (
+      this.lossAnim !== null &&
+      now - this.lossAnim.startTime >= LOSS_RING_MS
+    ) {
+      this.lossAnim = null;
+    }
+  }
+
   private drawCell(x: number, y: number): void {
     const size = this.cellSize - CELL_GAP;
     const sx = (x - this.cameraX) * this.cellSize + this.canvas.clientWidth / 2;
     const sy =
       (y - this.cameraY) * this.cellSize + this.canvas.clientHeight / 2;
     const board = this.board;
+    const key = keyOf(x, y);
     if (board.isRevealed(x, y)) {
-      this.drawTile(sx, sy, size, COLORS.revealed);
-      this.drawNumber(x, y, sx, sy, size);
+      const anim = this.revealAnims.get(key);
+      const progress =
+        anim === undefined
+          ? 1
+          : clamp01(
+              (performance.now() - anim.startTime - anim.delay) /
+                REVEAL_DURATION_MS,
+            );
+      this.drawRevealed(x, y, sx, sy, size, progress);
       return;
     }
     const hiddenHover =
@@ -124,10 +225,14 @@ export class Renderer {
       sx,
       sy,
       size,
-      hiddenHover ? COLORS.hiddenHover : COLORS.hidden,
+      hiddenHover ? canvasPalette().hiddenHover : canvasPalette().hidden,
     );
+    if (hiddenHover) this.drawAccentTint(sx, sy, size, 0.12);
+    const flagAnim = this.flagAnims.get(key);
     if (board.isFlagged(x, y)) {
-      this.drawFlag(sx, sy, size);
+      this.drawFlag(sx, sy, size, flagAnim ?? null);
+    } else if (flagAnim !== undefined) {
+      this.drawFlag(sx, sy, size, flagAnim);
     } else if (board.status === "lost" && board.isMine(x, y)) {
       this.drawMine(x, y, sx, sy, size);
     }
@@ -136,13 +241,59 @@ export class Renderer {
       this.hintCell.x === x &&
       this.hintCell.y === y
     ) {
-      this.ctx.strokeStyle = COLORS.hint;
-      this.ctx.lineWidth = 3;
-      this.ctx.shadowColor = COLORS.hint;
-      this.ctx.shadowBlur = 10;
-      this.ctx.strokeRect(sx - 1, sy - 1, size + 2, size + 2);
-      this.ctx.shadowBlur = 0;
+      this.drawHintGlow(sx, sy, size);
     }
+  }
+
+  private drawRevealed(
+    x: number,
+    y: number,
+    sx: number,
+    sy: number,
+    size: number,
+    progress: number,
+  ): void {
+    if (progress <= 0) {
+      this.drawTile(sx, sy, size, canvasPalette().hidden);
+      return;
+    }
+    this.drawTile(sx, sy, size, canvasPalette().revealed);
+    this.ctx.globalAlpha = progress;
+    this.drawNumber(x, y, sx, sy, size);
+    this.ctx.globalAlpha = 1 - progress;
+    this.drawTile(sx, sy, size, canvasPalette().hidden);
+    const flash = progress * (1 - progress) * 4 * 0.22;
+    if (flash > 0.01) {
+      this.ctx.globalAlpha = flash;
+      this.ctx.fillStyle = "#ffffff";
+      this.ctx.beginPath();
+      this.ctx.roundRect(sx, sy, size, size, CORNER_RADIUS);
+      this.ctx.fill();
+    }
+    this.ctx.globalAlpha = 1;
+  }
+
+  private drawAccentTint(
+    sx: number,
+    sy: number,
+    size: number,
+    alpha: number,
+  ): void {
+    this.ctx.globalAlpha = alpha;
+    this.ctx.fillStyle = accentColor();
+    this.ctx.beginPath();
+    this.ctx.roundRect(sx, sy, size, size, CORNER_RADIUS);
+    this.ctx.fill();
+    this.ctx.globalAlpha = 1;
+  }
+
+  private drawHintGlow(sx: number, sy: number, size: number): void {
+    this.ctx.strokeStyle = canvasPalette().hint;
+    this.ctx.lineWidth = 3;
+    this.ctx.shadowColor = canvasPalette().hint;
+    this.ctx.shadowBlur = 10;
+    this.ctx.strokeRect(sx - 1, sy - 1, size + 2, size + 2);
+    this.ctx.shadowBlur = 0;
   }
 
   private drawTile(sx: number, sy: number, size: number, color: string): void {
@@ -161,30 +312,65 @@ export class Renderer {
   ): void {
     const count = this.board.countAt(x, y);
     if (count === undefined || count === 0) return;
-    const palette = COLORS.numbers;
-    this.ctx.fillStyle = palette[(count - 1) % palette.length] ?? "#e2e8f0";
+    const palette = canvasPalette().numbers;
+    const fallback = palette[palette.length - 1] ?? "#ffffff";
+    this.ctx.fillStyle = palette[(count - 1) % palette.length] ?? fallback;
     this.ctx.font = `600 ${String(Math.round(size * 0.5))}px system-ui, sans-serif`;
     this.ctx.textAlign = "center";
     this.ctx.textBaseline = "middle";
     this.ctx.fillText(String(count), sx + size / 2, sy + size / 2 + 1);
   }
 
-  private drawFlag(sx: number, sy: number, size: number): void {
+  private drawFlag(
+    sx: number,
+    sy: number,
+    size: number,
+    anim: FlagAnimation | null,
+  ): void {
+    if (anim === null) {
+      this.paintFlag(sx, sy, size, { pole: 1, pennant: 1, alpha: 1 });
+      return;
+    }
+    const t = clamp01((performance.now() - anim.startTime) / FLAG_ANIMATION_MS);
+    const forward = anim.placing ? t : 1 - t;
+    this.paintFlag(sx, sy, size, {
+      pole: easeOutCubic(clamp01(forward / 0.55)),
+      pennant: easeOutBack(clamp01((forward - 0.35) / 0.65)),
+      alpha: anim.placing ? 1 : 1 - easeInCubic(t),
+    });
+  }
+
+  // algorithm: raise = pole grows from the tile, then the pennant slides up
+  // with a slight overshoot; removal plays the same curve reversed + fade
+  private paintFlag(
+    sx: number,
+    sy: number,
+    size: number,
+    raise: FlagRaiseState,
+  ): void {
+    const palette = canvasPalette();
     const cx = sx + size * 0.42;
-    const cy = sy + size * 0.22;
-    this.ctx.strokeStyle = COLORS.flagPole;
+    const baseY = sy + size * 0.78;
+    const topY = sy + size * 0.22;
+    const poleTop = baseY + (topY - baseY) * raise.pole;
+    this.ctx.globalAlpha = raise.alpha;
+    this.ctx.strokeStyle = palette.flagPole;
     this.ctx.lineWidth = Math.max(1.5, size * 0.06);
     this.ctx.beginPath();
-    this.ctx.moveTo(cx, cy);
-    this.ctx.lineTo(cx, sy + size * 0.78);
+    this.ctx.moveTo(cx, baseY);
+    this.ctx.lineTo(cx, poleTop);
     this.ctx.stroke();
-    this.ctx.fillStyle = COLORS.flag;
-    this.ctx.beginPath();
-    this.ctx.moveTo(cx, cy);
-    this.ctx.lineTo(cx + size * 0.3, cy + size * 0.14);
-    this.ctx.lineTo(cx, cy + size * 0.28);
-    this.ctx.closePath();
-    this.ctx.fill();
+    if (raise.pennant > 0) {
+      const pennantY = baseY + (topY - baseY) * raise.pennant;
+      this.ctx.fillStyle = palette.flag;
+      this.ctx.beginPath();
+      this.ctx.moveTo(cx, pennantY);
+      this.ctx.lineTo(cx + size * 0.3, pennantY + size * 0.14);
+      this.ctx.lineTo(cx, pennantY + size * 0.28);
+      this.ctx.closePath();
+      this.ctx.fill();
+    }
+    this.ctx.globalAlpha = 1;
   }
 
   private drawMine(
@@ -194,21 +380,22 @@ export class Renderer {
     sy: number,
     size: number,
   ): void {
+    const palette = canvasPalette();
     const exploded =
       this.board.explodedAt !== null &&
       this.board.explodedAt.x === x &&
       this.board.explodedAt.y === y;
     if (exploded) {
-      this.drawTile(sx, sy, size, COLORS.exploded);
+      this.drawTile(sx, sy, size, palette.exploded);
     }
     const cx = sx + size / 2;
     const cy = sy + size / 2;
     const radius = size * 0.22;
-    this.ctx.fillStyle = COLORS.mine;
+    this.ctx.fillStyle = palette.mine;
     this.ctx.beginPath();
     this.ctx.arc(cx, cy, radius, 0, Math.PI * 2);
     this.ctx.fill();
-    this.ctx.strokeStyle = COLORS.mine;
+    this.ctx.strokeStyle = palette.mine;
     this.ctx.lineWidth = Math.max(1.2, size * 0.05);
     for (const [dx, dy] of [
       [-1, -1],
@@ -226,4 +413,50 @@ export class Renderer {
       this.ctx.stroke();
     }
   }
+
+  private drawLossRing(): void {
+    const anim = this.lossAnim;
+    if (anim === null) return;
+    const t = (performance.now() - anim.startTime) / LOSS_RING_MS;
+    if (t >= 1) {
+      this.lossAnim = null;
+      return;
+    }
+    const sx =
+      (anim.cell.x - this.cameraX) * this.cellSize +
+      this.canvas.clientWidth / 2;
+    const sy =
+      (anim.cell.y - this.cameraY) * this.cellSize +
+      this.canvas.clientHeight / 2;
+    this.ctx.globalAlpha = 0.7 * (1 - t);
+    this.ctx.strokeStyle = canvasPalette().exploded;
+    this.ctx.lineWidth = 2 + 4 * (1 - t);
+    this.ctx.beginPath();
+    this.ctx.arc(
+      sx + this.cellSize / 2,
+      sy + this.cellSize / 2,
+      this.cellSize * (0.5 + 3 * easeOutCubic(t)),
+      0,
+      Math.PI * 2,
+    );
+    this.ctx.stroke();
+    this.ctx.globalAlpha = 1;
+  }
+}
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+function easeOutCubic(t: number): number {
+  return 1 - (1 - t) ** 3;
+}
+
+function easeInCubic(t: number): number {
+  return t ** 3;
+}
+
+function easeOutBack(t: number): number {
+  const c = 1.7;
+  return 1 + (c + 1) * (t - 1) ** 3 + c * (t - 1) ** 2;
 }

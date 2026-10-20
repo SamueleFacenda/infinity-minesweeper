@@ -31,6 +31,9 @@ export class Board {
   readonly density: number;
   status: GameStatus = "playing";
   explodedAt: Cell | null = null;
+  // cells changed by the most recent reveal / chord auto-fill, for animation
+  lastRevealed: readonly (readonly [number, number])[] = [];
+  lastFlagged: readonly (readonly [number, number])[] = [];
 
   private readonly revealedMap = new Map<string, number>();
   private readonly flagSet = new Set<string>();
@@ -84,6 +87,8 @@ export class Board {
 
   reveal(x: number, y: number): ClickResult {
     if (this.status !== "playing") return "ok";
+    this.lastRevealed = [];
+    this.lastFlagged = [];
     const key = keyOf(x, y);
     if (this.revealedMap.has(key) || this.flagSet.has(key)) return "ok";
     if (this.revealedMap.size === 0) this.pinArea(x, y);
@@ -95,6 +100,8 @@ export class Board {
   // all mines by simple counting.
   clickNumber(x: number, y: number): ClickResult {
     if (this.status !== "playing") return "ok";
+    this.lastRevealed = [];
+    this.lastFlagged = [];
     const count = this.revealedMap.get(keyOf(x, y));
     if (count === undefined) return "ok";
     const { flagged, unknown } = this.inspectNeighbors(x, y);
@@ -102,7 +109,12 @@ export class Board {
       return this.revealGroup(unknown);
     }
     if (count - flagged === unknown.length && unknown.length > 0) {
-      for (const [nx, ny] of unknown) this.flagSet.add(keyOf(nx, ny));
+      const autoFlagged: [number, number][] = [];
+      for (const [nx, ny] of unknown) {
+        this.flagSet.add(keyOf(nx, ny));
+        autoFlagged.push([nx, ny]);
+      }
+      this.lastFlagged = autoFlagged;
     }
     return "ok";
   }
@@ -209,6 +221,7 @@ export class Board {
       }
     }
     this.explodedAt = null;
+    this.lastRevealed = revealed;
     return { exploded: false, revealed };
   }
 

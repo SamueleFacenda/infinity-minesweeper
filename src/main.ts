@@ -10,6 +10,8 @@ import {
 import type { RunRecord } from "./game/leaderboard.js";
 import { Leaderboard } from "./game/leaderboard.js";
 import { Renderer } from "./render.js";
+import { ACCENTS, applyTheme, loadThemeSettings } from "./theme.js";
+import type { ThemeName } from "./theme.js";
 
 const DRAG_THRESHOLD_PX = 4;
 
@@ -22,6 +24,8 @@ interface Elements {
   hint: HTMLButtonElement;
   leaderboard: HTMLButtonElement;
   newGame: HTMLButtonElement;
+  theme: HTMLButtonElement;
+  accentDots: HTMLElement;
   overlay: HTMLDivElement;
   overlayTitle: HTMLElement;
   overlayText: HTMLElement;
@@ -41,6 +45,9 @@ class Game {
   private lastMilestone = 0;
   private dragStart: { x: number; y: number } | null = null;
   private dragged = false;
+  private theme: ThemeName;
+  private accent: string;
+  private accentDotButtons: HTMLButtonElement[] = [];
 
   constructor(
     private readonly elements: Elements,
@@ -48,8 +55,13 @@ class Game {
   ) {
     const ctx = this.elements.canvas.getContext("2d");
     if (ctx === null) throw new Error("canvas 2d context unavailable");
+    const settings = loadThemeSettings(window.localStorage);
+    this.theme = settings.theme;
+    this.accent = settings.accent;
     this.board = this.newBoard();
     this.renderer = new Renderer(this.elements.canvas, ctx, this.board);
+    this.buildAccentDots();
+    this.applyAppearance();
     this.populateDifficulties();
     this.registerEvents();
     window.setInterval(() => {
@@ -124,6 +136,37 @@ class Game {
     this.elements.modalClose.addEventListener("click", () => {
       this.hideModal();
     });
+    this.elements.theme.addEventListener("click", () => {
+      this.theme = this.theme === "nord" ? "charcoal" : "nord";
+      this.applyAppearance();
+    });
+  }
+
+  private applyAppearance(): void {
+    applyTheme(this.theme, this.accent, document, window.localStorage);
+    this.elements.theme.textContent =
+      this.theme === "nord" ? "Nord" : "Charcoal";
+    for (const dot of this.accentDotButtons) {
+      dot.classList.toggle("selected", dot.dataset.accent === this.accent);
+    }
+    this.renderer.draw();
+  }
+
+  private buildAccentDots(): void {
+    for (const preset of ACCENTS) {
+      const dot = document.createElement("button");
+      dot.type = "button";
+      dot.className = "accent-dot";
+      dot.dataset.accent = preset.hex;
+      dot.style.background = preset.hex;
+      dot.setAttribute("aria-label", `Accent ${preset.name}`);
+      dot.addEventListener("click", () => {
+        this.accent = preset.hex;
+        this.applyAppearance();
+      });
+      this.elements.accentDots.appendChild(dot);
+      this.accentDotButtons.push(dot);
+    }
   }
 
   private cellFromEvent(event: MouseEvent): Cell {
@@ -182,7 +225,12 @@ class Game {
     event.preventDefault();
     if (this.board.status !== "playing") return;
     const cell = this.cellFromEvent(event);
+    const wasFlagged = this.board.isFlagged(cell.x, cell.y);
     this.board.toggleFlag(cell.x, cell.y);
+    const isFlagged = this.board.isFlagged(cell.x, cell.y);
+    if (isFlagged !== wasFlagged) {
+      this.renderer.animateFlagToggle(cell, isFlagged);
+    }
     this.renderer.hintCell = null;
     this.updateStats();
     this.renderer.draw();
@@ -240,15 +288,25 @@ class Game {
       ? this.board.clickNumber(cell.x, cell.y)
       : this.board.reveal(cell.x, cell.y);
     this.renderer.hintCell = null;
-    this.applyResult(result);
+    this.applyResult(result, cell);
   }
 
-  private applyResult(result: ClickResult): void {
+  private applyResult(result: ClickResult, origin: Cell): void {
     this.startTimerIfNeeded();
     this.recordMilestones();
     this.updateStats();
+    if (this.board.lastFlagged.length > 0) {
+      this.renderer.animateFlagRaise(this.board.lastFlagged);
+    }
+    if (result === "ok" && this.board.lastRevealed.length > 0) {
+      this.renderer.animateReveal(this.board.lastRevealed, origin);
+    }
     this.renderer.draw();
-    if (result === "lost") this.showLossOverlay();
+    if (result === "lost") {
+      const explodedAt = this.board.explodedAt;
+      if (explodedAt !== null) this.renderer.animateLoss(explodedAt);
+      this.showLossOverlay();
+    }
   }
 
   private startTimerIfNeeded(): void {
@@ -438,6 +496,8 @@ const elements: Elements = {
   hint: requireElement("btn-hint", HTMLButtonElement),
   leaderboard: requireElement("btn-leaderboard", HTMLButtonElement),
   newGame: requireElement("btn-new", HTMLButtonElement),
+  theme: requireElement("btn-theme", HTMLButtonElement),
+  accentDots: requireElement("accent-dots", HTMLElement),
   overlay: requireElement("overlay", HTMLDivElement),
   overlayTitle: requireElement("overlay-title", HTMLElement),
   overlayText: requireElement("overlay-text", HTMLElement),

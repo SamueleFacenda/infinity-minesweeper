@@ -201,7 +201,10 @@ main {
   backdrop-filter: blur(4px);
 }
 
-.overlay:not(.hidden),
+.overlay:not(.hidden) {
+  animation: fade-in 900ms ease-out;
+}
+
 .modal:not(.hidden) {
   animation: fade-in 180ms ease-out;
 }
@@ -215,6 +218,13 @@ main {
   text-align: center;
   min-width: 18rem;
   box-shadow: 0 16px 48px rgb(0 0 0 / 0.5);
+}
+
+.overlay-card {
+  animation: card-in 600ms ease-out;
+}
+
+.modal-card {
   animation: card-in 250ms ease-out;
 }
 

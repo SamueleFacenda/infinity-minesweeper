@@ -231,6 +231,9 @@ export class Renderer {
     const flagAnim = this.flagAnims.get(key);
     if (board.isFlagged(x, y)) {
       this.drawFlag(sx, sy, size, flagAnim ?? null);
+      if (board.status === "lost" && !board.isMine(x, y)) {
+        this.drawWrongFlagCross(sx, sy, size);
+      }
     } else if (flagAnim !== undefined) {
       this.drawFlag(sx, sy, size, flagAnim);
     } else if (board.status === "lost" && board.isMine(x, y)) {
@@ -371,6 +374,19 @@ export class Renderer {
       this.ctx.fill();
     }
     this.ctx.globalAlpha = 1;
+  }
+
+  // why: after loss, a flag on a safe cell is the player's mistake
+  private drawWrongFlagCross(sx: number, sy: number, size: number): void {
+    const inset = size * 0.18;
+    this.ctx.strokeStyle = canvasPalette().exploded;
+    this.ctx.lineWidth = Math.max(1.5, size * 0.08);
+    this.ctx.beginPath();
+    this.ctx.moveTo(sx + inset, sy + inset);
+    this.ctx.lineTo(sx + size - inset, sy + size - inset);
+    this.ctx.moveTo(sx + size - inset, sy + inset);
+    this.ctx.lineTo(sx + inset, sy + size - inset);
+    this.ctx.stroke();
   }
 
   private drawMine(

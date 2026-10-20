@@ -223,6 +223,10 @@ main {
   margin: 0 0 0.5rem;
 }
 
+.overlay-card h2 {
+  max-width: 26rem;
+}
+
 .overlay-card p {
   margin: 0 0 1rem;
   color: var(--muted);

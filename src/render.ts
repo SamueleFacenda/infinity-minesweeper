@@ -12,7 +12,9 @@ import { accentColor, canvasPalette } from "./theme.js";
 const MIN_CELL_SIZE = 14;
 const MAX_CELL_SIZE = 56;
 const CELL_GAP = 1;
-const CORNER_RADIUS = 3;
+// why: proportional radius keeps tiles equally rounded at every zoom level
+const CORNER_RADIUS_RATIO = 0.1;
+const MIN_CORNER_RADIUS = 1;
 
 const REVEAL_DURATION_MS = 200;
 const REVEAL_STAGGER_MS = 14;
@@ -133,11 +135,16 @@ export class Renderer {
   }
 
   screenToCell(px: number, py: number): Cell {
+    const world = this.screenToWorld(px, py);
+    return { x: Math.floor(world.x), y: Math.floor(world.y) };
+  }
+
+  private screenToWorld(px: number, py: number): Cell {
     const width = this.canvas.clientWidth;
     const height = this.canvas.clientHeight;
     return {
-      x: Math.floor(this.cameraX + (px - width / 2) / this.cellSize),
-      y: Math.floor(this.cameraY + (py - height / 2) / this.cellSize),
+      x: this.cameraX + (px - width / 2) / this.cellSize,
+      y: this.cameraY + (py - height / 2) / this.cellSize,
     };
   }
 
@@ -147,14 +154,17 @@ export class Renderer {
   }
 
   zoomAt(px: number, py: number, factor: number): void {
-    const before = this.screenToCell(px, py);
+    // why: anchoring on the float world point (not the integer cell)
+    // keeps the exact point under the cursor fixed across zoom steps
+    const anchor = this.screenToWorld(px, py);
     this.cellSize = Math.min(
       MAX_CELL_SIZE,
       Math.max(MIN_CELL_SIZE, this.cellSize * factor),
     );
-    const after = this.screenToCell(px, py);
-    this.cameraX += before.x - after.x;
-    this.cameraY += before.y - after.y;
+    const width = this.canvas.clientWidth;
+    const height = this.canvas.clientHeight;
+    this.cameraX = anchor.x - (px - width / 2) / this.cellSize;
+    this.cameraY = anchor.y - (py - height / 2) / this.cellSize;
   }
 
   centerOn(cell: Cell): void {
@@ -267,7 +277,7 @@ export class Renderer {
       this.ctx.globalAlpha = flash;
       this.ctx.fillStyle = "#ffffff";
       this.ctx.beginPath();
-      this.ctx.roundRect(sx, sy, size, size, CORNER_RADIUS);
+      this.ctx.roundRect(sx, sy, size, size, tileRadius(size));
       this.ctx.fill();
     }
     this.ctx.globalAlpha = 1;
@@ -282,7 +292,7 @@ export class Renderer {
     this.ctx.globalAlpha = alpha;
     this.ctx.fillStyle = accentColor();
     this.ctx.beginPath();
-    this.ctx.roundRect(sx, sy, size, size, CORNER_RADIUS);
+    this.ctx.roundRect(sx, sy, size, size, tileRadius(size));
     this.ctx.fill();
     this.ctx.globalAlpha = 1;
   }
@@ -299,7 +309,7 @@ export class Renderer {
   private drawTile(sx: number, sy: number, size: number, color: string): void {
     this.ctx.fillStyle = color;
     this.ctx.beginPath();
-    this.ctx.roundRect(sx, sy, size, size, CORNER_RADIUS);
+    this.ctx.roundRect(sx, sy, size, size, tileRadius(size));
     this.ctx.fill();
   }
 
@@ -442,6 +452,10 @@ export class Renderer {
     this.ctx.stroke();
     this.ctx.globalAlpha = 1;
   }
+}
+
+function tileRadius(size: number): number {
+  return Math.max(MIN_CORNER_RADIUS, size * CORNER_RADIUS_RATIO);
 }
 
 function clamp01(value: number): number {

@@ -9,6 +9,7 @@ import {
 } from "./game/difficulty.js";
 import type { RunRecord } from "./game/leaderboard.js";
 import { Leaderboard } from "./game/leaderboard.js";
+import { randomTaunt } from "./game/taunts.js";
 import { Renderer } from "./render.js";
 import { ACCENTS, applyTheme, loadThemeSettings } from "./theme.js";
 import type { ThemeName } from "./theme.js";
@@ -30,6 +31,7 @@ interface Elements {
   overlay: HTMLDivElement;
   overlayTitle: HTMLElement;
   overlayText: HTMLElement;
+  overlayInspect: HTMLButtonElement;
   overlayAction: HTMLButtonElement;
   modal: HTMLDivElement;
   modalClose: HTMLButtonElement;
@@ -130,6 +132,9 @@ class Game {
     });
     this.elements.newGame.addEventListener("click", () => {
       this.restart();
+    });
+    this.elements.overlayInspect.addEventListener("click", () => {
+      this.hideOverlay();
     });
     this.elements.overlayAction.addEventListener("click", () => {
       this.restart();
@@ -380,7 +385,7 @@ class Game {
   }
 
   private showLossOverlay(): void {
-    this.elements.overlayTitle.textContent = "Game over";
+    this.elements.overlayTitle.textContent = randomTaunt();
     this.elements.overlayText.textContent = `Cleared ${String(this.board.revealedCount)} tiles.`;
     this.elements.overlay.classList.remove("hidden");
   }
@@ -502,6 +507,7 @@ const elements: Elements = {
   overlay: requireElement("overlay", HTMLDivElement),
   overlayTitle: requireElement("overlay-title", HTMLElement),
   overlayText: requireElement("overlay-text", HTMLElement),
+  overlayInspect: requireElement("overlay-inspect", HTMLButtonElement),
   overlayAction: requireElement("overlay-action", HTMLButtonElement),
   modal: requireElement("leaderboard-modal", HTMLDivElement),
   modalClose: requireElement("modal-close", HTMLButtonElement),

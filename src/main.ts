@@ -16,6 +16,7 @@ import type { ThemeName } from "./theme.js";
 
 const DRAG_THRESHOLD_PX = 4;
 const ZOOM_STEP = 1.02;
+const LOSS_OVERLAY_DELAY_MS = 2000;
 
 interface Elements {
   canvas: HTMLCanvasElement;
@@ -48,6 +49,7 @@ class Game {
   private lastMilestone = 0;
   private dragStart: { x: number; y: number } | null = null;
   private dragged = false;
+  private lossOverlayTimeout: number | null = null;
   private theme: ThemeName;
   private accent: string;
   private accentDotButtons: HTMLButtonElement[] = [];
@@ -311,8 +313,21 @@ class Game {
     if (result === "lost") {
       const explodedAt = this.board.explodedAt;
       if (explodedAt !== null) this.renderer.animateLoss(explodedAt);
-      this.showLossOverlay();
+      this.scheduleLossOverlay();
     }
+  }
+
+  // why: the un-blurred board (ring, mines, wrong flags) stays visible
+  // until the overlay covers it; reduced motion draws no ring, so no wait
+  private scheduleLossOverlay(): void {
+    if (this.renderer.reducedMotion) {
+      this.showLossOverlay();
+      return;
+    }
+    this.lossOverlayTimeout = window.setTimeout(() => {
+      this.lossOverlayTimeout = null;
+      this.showLossOverlay();
+    }, LOSS_OVERLAY_DELAY_MS);
   }
 
   private startTimerIfNeeded(): void {
@@ -373,6 +388,10 @@ class Game {
   }
 
   private restart(): void {
+    if (this.lossOverlayTimeout !== null) {
+      window.clearTimeout(this.lossOverlayTimeout);
+      this.lossOverlayTimeout = null;
+    }
     this.board = this.newBoard();
     this.renderer.setBoard(this.board);
     this.renderer.centerOn({ x: 0, y: 0 });

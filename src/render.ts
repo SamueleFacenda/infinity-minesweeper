@@ -20,10 +20,10 @@ const MIN_CORNER_RADIUS = 1;
 // between sheet rects when the camera sits on fractional coordinates
 const SHEET_OVERDRAW_PX = 0.5;
 
-const REVEAL_DURATION_MS = 200;
-const REVEAL_STAGGER_MS = 14;
+const REVEAL_DURATION_MS = 600;
+const REVEAL_STAGGER_MS = 50;
 const FLAG_ANIMATION_MS = 260;
-const LOSS_RING_MS = 650;
+const LOSS_RING_MS = 1200;
 
 interface RevealAnimation {
   readonly startTime: number;
@@ -57,9 +57,8 @@ export class Renderer {
   private readonly flagAnims = new Map<string, FlagAnimation>();
   private lossAnim: LossAnimation | null = null;
   private animFrame: number | null = null;
-  private readonly reducedMotion = window.matchMedia(
-    "(prefers-reduced-motion: reduce)",
-  ).matches;
+  readonly reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
+    .matches;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,

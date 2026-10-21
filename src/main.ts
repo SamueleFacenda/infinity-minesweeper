@@ -210,7 +210,7 @@ class Game {
         this.renderer.panBy(event.movementX, event.movementY);
       }
     }
-    this.renderer.draw();
+    this.renderer.requestDraw();
   }
 
   private onMouseUp(event: MouseEvent): void {
@@ -225,7 +225,7 @@ class Game {
     this.dragStart = null;
     this.dragged = false;
     this.renderer.hoverCell = null;
-    this.renderer.draw();
+    this.renderer.requestDraw();
   }
 
   private onContextMenu(event: MouseEvent): void {
@@ -240,7 +240,7 @@ class Game {
     }
     this.renderer.hintCell = null;
     this.updateStats();
-    this.renderer.draw();
+    this.renderer.requestDraw();
   }
 
   private onWheel(event: WheelEvent): void {
@@ -252,12 +252,12 @@ class Game {
       event.clientY - rect.top,
       factor,
     );
-    this.renderer.draw();
+    this.renderer.requestDraw();
   }
 
   private onResize(): void {
     this.renderer.resize();
-    this.renderer.draw();
+    this.renderer.requestDraw();
   }
 
   private onKeyDown(event: KeyboardEvent): void {
@@ -286,7 +286,7 @@ class Game {
       default:
         return;
     }
-    this.renderer.draw();
+    this.renderer.requestDraw();
   }
 
   private clickCell(cell: Cell): void {

@@ -40,6 +40,13 @@ interface FlagRaiseState {
   readonly alpha: number;
 }
 
+interface MineSprite {
+  readonly cellSize: number;
+  readonly color: string;
+  readonly ratio: number;
+  readonly canvas: HTMLCanvasElement;
+}
+
 export class Renderer {
   cellSize = 30;
   cameraX = 0;
@@ -51,6 +58,8 @@ export class Renderer {
   private readonly flagAnims = new Map<string, FlagAnimation>();
   private lossAnim: LossAnimation | null = null;
   private animFrame: number | null = null;
+  private drawPending = false;
+  private mineSprite: MineSprite | null = null;
   readonly reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
     .matches;
 
@@ -104,7 +113,7 @@ export class Renderer {
         delay: distance * REVEAL_STAGGER_MS,
       });
     }
-    this.scheduleAnimationLoop();
+    this.scheduleAnimationFrame();
   }
 
   animateFlagRaise(cells: readonly (readonly [number, number])[]) {
@@ -113,7 +122,7 @@ export class Renderer {
     for (const [x, y] of cells) {
       this.flagAnims.set(keyOf(x, y), { placing: true, startTime });
     }
-    this.scheduleAnimationLoop();
+    this.scheduleAnimationFrame();
   }
 
   animateFlagToggle(cell: Cell, placing: boolean) {
@@ -122,13 +131,13 @@ export class Renderer {
       placing,
       startTime: performance.now(),
     });
-    this.scheduleAnimationLoop();
+    this.scheduleAnimationFrame();
   }
 
   animateLoss(cell: Cell) {
     if (this.reducedMotion) return;
     this.lossAnim = { cell, startTime: performance.now() };
-    this.scheduleAnimationLoop();
+    this.scheduleAnimationFrame();
   }
 
   screenToCell(px: number, py: number): Cell {
@@ -161,24 +170,31 @@ export class Renderer {
     this.cameraY = cell.y;
   }
 
-  private scheduleAnimationLoop(): void {
-    if (this.reducedMotion || this.animFrame !== null) return;
+  // why: high-polling mice fire mousemove far faster than the display
+  // refreshes; coalescing input redraws into the shared animation loop
+  // keeps one draw per frame regardless of event rate
+  requestDraw(): void {
+    this.drawPending = true;
+    this.scheduleAnimationFrame();
+  }
+
+  private scheduleAnimationFrame(): void {
+    if (this.animFrame !== null) return;
     this.animFrame = requestAnimationFrame(() => {
-      this.animFrame = null;
-      this.pruneAnimations(performance.now());
-      if (
-        this.revealAnims.size === 0 &&
-        this.flagAnims.size === 0 &&
-        this.lossAnim === null
-      ) {
-        return;
-      }
-      this.draw();
-      this.scheduleAnimationLoop();
+      this.onAnimationFrame();
     });
   }
 
-  private pruneAnimations(now: number): void {
+  private onAnimationFrame(): void {
+    this.animFrame = null;
+    const animationsActive = this.pruneAnimations(performance.now());
+    if (!animationsActive && !this.drawPending) return;
+    this.drawPending = false;
+    this.draw();
+    this.scheduleAnimationFrame();
+  }
+
+  private pruneAnimations(now: number): boolean {
     for (const [key, anim] of this.revealAnims) {
       if (now - anim.startTime - anim.delay >= REVEAL_DURATION_MS) {
         this.revealAnims.delete(key);
@@ -195,6 +211,11 @@ export class Renderer {
     ) {
       this.lossAnim = null;
     }
+    return (
+      this.revealAnims.size > 0 ||
+      this.flagAnims.size > 0 ||
+      this.lossAnim !== null
+    );
   }
 
   private drawCell(x: number, y: number): void {
@@ -403,30 +424,25 @@ export class Renderer {
     if (exploded) {
       this.drawTile(sx, sy, size, palette.exploded);
     }
-    const cx = sx + size / 2;
-    const cy = sy + size / 2;
-    const radius = size * 0.22;
-    this.ctx.fillStyle = palette.mine;
-    this.ctx.beginPath();
-    this.ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    this.ctx.fill();
-    this.ctx.strokeStyle = palette.mine;
-    this.ctx.lineWidth = Math.max(1.2, size * 0.05);
-    for (const [dx, dy] of [
-      [-1, -1],
-      [1, -1],
-      [-1, 1],
-      [1, 1],
-      [0, -1],
-      [0, 1],
-      [-1, 0],
-      [1, 0],
-    ] as const) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(cx - dx * radius, cy - dy * radius);
-      this.ctx.lineTo(cx + dx * radius * 1.6, cy + dy * radius * 1.6);
-      this.ctx.stroke();
+    const sprite = this.mineSpriteFor(size, palette.mine);
+    this.ctx.drawImage(sprite, sx, sy, size, size);
+  }
+
+  // why: after loss the viewport can hold thousands of mines; a cached
+  // raster replaces 9 path operations per mine with one drawImage
+  private mineSpriteFor(size: number, color: string): HTMLCanvasElement {
+    const ratio = window.devicePixelRatio;
+    const current = this.mineSprite;
+    if (
+      current?.cellSize === this.cellSize &&
+      current.color === color &&
+      current.ratio === ratio
+    ) {
+      return current.canvas;
     }
+    const canvas = buildMineSprite(size, color, ratio);
+    this.mineSprite = { cellSize: this.cellSize, color, ratio, canvas };
+    return canvas;
   }
 
   private drawLossRing(): void {
@@ -457,6 +473,44 @@ export class Renderer {
     this.ctx.stroke();
     this.ctx.globalAlpha = 1;
   }
+}
+
+function buildMineSprite(
+  size: number,
+  color: string,
+  ratio: number,
+): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(size * ratio);
+  canvas.height = Math.ceil(size * ratio);
+  const ctx = canvas.getContext("2d");
+  if (ctx === null) throw new Error("sprite 2d context unavailable");
+  ctx.scale(ratio, ratio);
+  const cx = size / 2;
+  const cy = size / 2;
+  const radius = size * 0.22;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = Math.max(1.2, size * 0.05);
+  for (const [dx, dy] of [
+    [-1, -1],
+    [1, -1],
+    [-1, 1],
+    [1, 1],
+    [0, -1],
+    [0, 1],
+    [-1, 0],
+    [1, 0],
+  ] as const) {
+    ctx.beginPath();
+    ctx.moveTo(cx - dx * radius, cy - dy * radius);
+    ctx.lineTo(cx + dx * radius * 1.6, cy + dy * radius * 1.6);
+    ctx.stroke();
+  }
+  return canvas;
 }
 
 function clamp01(value: number): number {

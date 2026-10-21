@@ -60,7 +60,7 @@
             installPhase = ''
               mkdir -p $out
               cp -r dist/. $out/
-              cp src/index.html src/style.css $out/
+              cp src/index.html src/style.css src/favicon.svg $out/
             '';
           };
 

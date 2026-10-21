@@ -6,7 +6,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && cp src/index.html src/style.css dist/",
+    "build": "tsc -p tsconfig.build.json && cp src/index.html src/style.css src/favicon.svg dist/",
     "dev": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
     "serve": "python3 -m http.server 8080 --directory dist",
     "test": "vitest run",

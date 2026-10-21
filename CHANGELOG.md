@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - HUD polish: button/select transitions, toast slide-in, overlay and modal fade/scale-in, focus rings in the accent color
 - Loss screen taunts: random insult message from a 40-entry list
 - Board inspection after loss: "Inspect board" button hides the overlay so the final board can be panned and zoomed; wrong flags are crossed out in red
+- SVG favicon: spiky mine on the dark game background
 
 ### Changed
 

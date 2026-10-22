@@ -15,6 +15,7 @@ import { ACCENTS, applyTheme, loadThemeSettings } from "./theme.js";
 import type { ThemeName } from "./theme.js";
 
 const DRAG_THRESHOLD_PX = 4;
+const ZOOM_STEP = 1.02;
 const LOSS_OVERLAY_DELAY_MS = 2000;
 
 interface Elements {
@@ -246,7 +247,7 @@ class Game {
   private onWheel(event: WheelEvent): void {
     event.preventDefault();
     const rect = this.elements.canvas.getBoundingClientRect();
-    const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
+    const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
     this.renderer.zoomAt(
       event.clientX - rect.left,
       event.clientY - rect.top,

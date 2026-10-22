@@ -7,7 +7,6 @@ export type ThemeName = "nord" | "charcoal";
 export interface CanvasPalette {
   readonly background: string;
   readonly hidden: string;
-  readonly hiddenHover: string;
   readonly revealed: string;
   readonly grid: string;
   readonly flag: string;
@@ -35,7 +34,8 @@ export const ACCENTS: readonly AccentPreset[] = [
 interface ThemeDefinition {
   readonly cssVars: Readonly<Record<string, string>>;
   readonly defaultAccent: string;
-  readonly canvas: CanvasPalette;
+  // hidden is derived from the accent at apply time, not stored per theme
+  readonly canvas: Omit<CanvasPalette, "hidden">;
 }
 
 export const THEMES: Readonly<Record<ThemeName, ThemeDefinition>> = {
@@ -54,8 +54,6 @@ export const THEMES: Readonly<Record<ThemeName, ThemeDefinition>> = {
     defaultAccent: "#88c0d0",
     canvas: {
       background: "#2e3440",
-      hidden: "#434c5e",
-      hiddenHover: "#4c566a",
       revealed: "#3b4252",
       grid: "#2e3440",
       flag: "#bf616a",
@@ -90,8 +88,6 @@ export const THEMES: Readonly<Record<ThemeName, ThemeDefinition>> = {
     defaultAccent: "#d08770",
     canvas: {
       background: "#17130f",
-      hidden: "#332b20",
-      hiddenHover: "#40362a",
       revealed: "#241e15",
       grid: "#17130f",
       flag: "#e0954f",
@@ -148,7 +144,10 @@ export function loadThemeSettings(storage: Storage): ThemeSettings {
   return { theme, accent };
 }
 
-let activeCanvasPalette: CanvasPalette = THEMES.nord.canvas;
+let activeCanvasPalette: CanvasPalette = {
+  ...THEMES.nord.canvas,
+  hidden: THEMES.nord.defaultAccent,
+};
 let activeAccent: string = THEMES.nord.defaultAccent;
 
 export function canvasPalette(): CanvasPalette {
@@ -173,7 +172,7 @@ export function applyTheme(
     documentRef.documentElement.style.setProperty(name, value);
   }
   documentRef.documentElement.style.setProperty("--accent", resolvedAccent);
-  activeCanvasPalette = definition.canvas;
+  activeCanvasPalette = { ...definition.canvas, hidden: resolvedAccent };
   activeAccent = resolvedAccent;
   try {
     storage.setItem(

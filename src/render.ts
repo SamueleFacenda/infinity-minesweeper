@@ -16,6 +16,9 @@ const CELL_GAP = 1;
 // why: proportional radius keeps tiles equally rounded at every zoom level
 const CORNER_RADIUS_RATIO = 0.1;
 const MIN_CORNER_RADIUS = 1;
+// why: island corners (tile corners facing hidden terrain on both sides)
+// round far more than interior tile corners for a smooth island outline
+const ISLAND_CORNER_RADIUS_RATIO = 0.4;
 // why: overlap between neighboring hidden cells hides subpixel seams
 // between sheet rects when the camera sits on fractional coordinates
 const SHEET_OVERDRAW_PX = 0.5;
@@ -46,6 +49,24 @@ interface FlagRaiseState {
   readonly alpha: number;
 }
 
+interface TileTerrain {
+  readonly left: boolean;
+  readonly right: boolean;
+  readonly top: boolean;
+  readonly bottom: boolean;
+  readonly topLeft: boolean;
+  readonly topRight: boolean;
+  readonly bottomLeft: boolean;
+  readonly bottomRight: boolean;
+}
+
+interface ConcavePaint {
+  readonly sx: number;
+  readonly sy: number;
+  readonly size: number;
+  readonly terrain: TileTerrain;
+}
+
 export class Renderer {
   cellSize = 30;
   cameraX = 0;
@@ -55,6 +76,7 @@ export class Renderer {
 
   private readonly revealAnims = new Map<string, RevealAnimation>();
   private readonly flagAnims = new Map<string, FlagAnimation>();
+  private readonly concavePaints: ConcavePaint[] = [];
   private lossAnim: LossAnimation | null = null;
   private animFrame: number | null = null;
   readonly reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
@@ -103,6 +125,9 @@ export class Renderer {
         if (this.board.isRevealed(cx, cy)) this.drawCell(cx, cy);
       }
     }
+    // why: concave bites paint after every halo band so no later band can
+    // slice through a bite's legs
+    this.flushConcaveCorners();
     this.drawLossRing();
   }
 
@@ -300,7 +325,10 @@ export class Renderer {
       this.drawSheetRect(sx, sy, size + CELL_GAP);
       return;
     }
-    this.drawTile(sx, sy, size, canvasPalette().revealed);
+    const terrain = this.tileTerrain(x, y);
+    const radii = tileRadii(terrain, size);
+    this.paintIslandHalo(sx, sy, size, terrain);
+    this.drawTile(sx, sy, size, canvasPalette().revealed, radii);
     this.ctx.globalAlpha = progress;
     this.drawNumber(x, y, sx, sy, size);
     this.ctx.globalAlpha = 1 - progress;
@@ -310,10 +338,115 @@ export class Renderer {
       this.ctx.globalAlpha = flash;
       this.ctx.fillStyle = "#ffffff";
       this.ctx.beginPath();
-      this.ctx.roundRect(sx, sy, size, size, tileRadius(size));
+      this.ctx.roundRect(sx, sy, size, size, radii);
       this.ctx.fill();
     }
     this.ctx.globalAlpha = 1;
+    if (hasConcaveCorner(terrain)) {
+      this.concavePaints.push({ sx, sy, size, terrain });
+    }
+  }
+
+  // why: the accent halo fills the border zone around a tile (the gaps the
+  // tile leaves inside its cell plus the big-radius corner cuts) so the
+  // island edge reads as sheet meeting tile directly, not dark background
+  private paintIslandHalo(
+    sx: number,
+    sy: number,
+    size: number,
+    terrain: TileTerrain,
+  ): void {
+    const cellSize = size + CELL_GAP;
+    const radius = islandRadius(size);
+    this.ctx.fillStyle = canvasPalette().hidden;
+    if (terrain.top) {
+      this.ctx.fillRect(sx - 0.5, sy - 1, cellSize + 1, 1.5);
+    }
+    if (terrain.left) {
+      this.ctx.fillRect(sx - 1, sy - 0.5, 1.5, cellSize + 1);
+    }
+    if (terrain.right) {
+      this.ctx.fillRect(sx + size - 0.5, sy - 0.5, 2, cellSize + 1);
+    }
+    if (terrain.bottom) {
+      this.ctx.fillRect(sx - 0.5, sy + size - 0.5, cellSize + 1, 2);
+    }
+    if (terrain.left && terrain.top) {
+      this.ctx.fillRect(sx - 1, sy - 1, radius + 2, radius + 2);
+    }
+    if (terrain.right && terrain.top) {
+      this.ctx.fillRect(sx + size - radius - 1, sy - 1, radius + 2, radius + 2);
+    }
+    if (terrain.right && terrain.bottom) {
+      this.ctx.fillRect(
+        sx + size - radius - 1,
+        sy + size - radius - 1,
+        radius + 2,
+        radius + 2,
+      );
+    }
+    if (terrain.left && terrain.bottom) {
+      this.ctx.fillRect(sx - 1, sy + size - radius - 1, radius + 2, radius + 2);
+    }
+  }
+
+  // why: at a vertex with three revealed cells and one hidden cell the
+  // sheet cell's corner pokes sharply into the island — the bite rounds
+  // the sheet's corner off with a concave arc, tangent to both border
+  // edges, so every island corner is smooth. Bites center on the CELL
+  // vertex (the tile is inset on right/bottom) and paint after all halo
+  // bands so the arc hands off to the border halo exactly.
+  private flushConcaveCorners(): void {
+    if (this.concavePaints.length === 0) return;
+    this.ctx.fillStyle = canvasPalette().revealed;
+    for (const paint of this.concavePaints) {
+      const { sx, sy, size, terrain } = paint;
+      const right = sx + size + CELL_GAP;
+      const bottom = sy + size + CELL_GAP;
+      const radius = islandRadius(size);
+      if (terrain.topLeft && !terrain.top && !terrain.left) {
+        this.paintConcaveBite(sx, sy, -1, -1, radius);
+      }
+      if (terrain.topRight && !terrain.top && !terrain.right) {
+        this.paintConcaveBite(right, sy, 1, -1, radius);
+      }
+      if (terrain.bottomRight && !terrain.right && !terrain.bottom) {
+        this.paintConcaveBite(right, bottom, 1, 1, radius);
+      }
+      if (terrain.bottomLeft && !terrain.left && !terrain.bottom) {
+        this.paintConcaveBite(sx, bottom, -1, 1, radius);
+      }
+    }
+    this.concavePaints.length = 0;
+  }
+
+  // algorithm: legs run from the two tangent points through the vertex,
+  // then the arc (centered radius-deep inside the hidden cell) closes
+  // the path — filling the crescent outside the arc rounds the sheet's
+  // corner with a concave curve instead of a convex bulge
+  private paintConcaveBite(
+    vx: number,
+    vy: number,
+    hx: number,
+    hy: number,
+    radius: number,
+  ): void {
+    const angleAtVertical = hx === 1 ? Math.PI : 0;
+    const angleAtHorizontal = hy === 1 ? Math.PI * 1.5 : Math.PI * 0.5;
+    this.ctx.beginPath();
+    this.ctx.moveTo(vx + hx * radius, vy);
+    this.ctx.lineTo(vx, vy);
+    this.ctx.lineTo(vx, vy + hy * radius);
+    this.ctx.arc(
+      vx + hx * radius,
+      vy + hy * radius,
+      radius,
+      angleAtVertical,
+      angleAtHorizontal,
+      hx !== hy,
+    );
+    this.ctx.closePath();
+    this.ctx.fill();
   }
 
   private drawSheetRect(sx: number, sy: number, cellSize: number): void {
@@ -335,10 +468,30 @@ export class Renderer {
     this.ctx.shadowBlur = 0;
   }
 
-  private drawTile(sx: number, sy: number, size: number, color: string): void {
+  private tileTerrain(x: number, y: number): TileTerrain {
+    const hidden = (nx: number, ny: number) => !this.board.isRevealed(nx, ny);
+    return {
+      left: hidden(x - 1, y),
+      right: hidden(x + 1, y),
+      top: hidden(x, y - 1),
+      bottom: hidden(x, y + 1),
+      topLeft: hidden(x - 1, y - 1),
+      topRight: hidden(x + 1, y - 1),
+      bottomLeft: hidden(x - 1, y + 1),
+      bottomRight: hidden(x + 1, y + 1),
+    };
+  }
+
+  private drawTile(
+    sx: number,
+    sy: number,
+    size: number,
+    color: string,
+    radii?: [number, number, number, number],
+  ): void {
     this.ctx.fillStyle = color;
     this.ctx.beginPath();
-    this.ctx.roundRect(sx, sy, size, size, tileRadius(size));
+    this.ctx.roundRect(sx, sy, size, size, radii ?? tileRadius(size));
     this.ctx.fill();
   }
 
@@ -534,6 +687,36 @@ export class Renderer {
     this.ctx.stroke();
     this.ctx.globalAlpha = 1;
   }
+}
+
+function hasConcaveCorner(terrain: TileTerrain): boolean {
+  return (
+    (terrain.topLeft && !terrain.top && !terrain.left) ||
+    (terrain.topRight && !terrain.top && !terrain.right) ||
+    (terrain.bottomRight && !terrain.right && !terrain.bottom) ||
+    (terrain.bottomLeft && !terrain.left && !terrain.bottom)
+  );
+}
+
+function islandRadius(size: number): number {
+  return Math.min(size * ISLAND_CORNER_RADIUS_RATIO, size / 2);
+}
+
+// why: a tile corner is an island corner when both orthogonal neighbors
+// are hidden sheet — straight border runs and interior corners keep the
+// small per-tile radius, so the discovered region stays "tiled" inside
+function tileRadii(
+  terrain: TileTerrain,
+  size: number,
+): [number, number, number, number] {
+  const island = islandRadius(size);
+  const interior = tileRadius(size);
+  return [
+    terrain.left && terrain.top ? island : interior,
+    terrain.right && terrain.top ? island : interior,
+    terrain.right && terrain.bottom ? island : interior,
+    terrain.left && terrain.bottom ? island : interior,
+  ];
 }
 
 function tileRadius(size: number): number {

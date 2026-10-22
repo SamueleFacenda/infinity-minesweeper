@@ -23,6 +23,9 @@ const ISLAND_CORNER_RADIUS_RATIO = 0.4;
 // why: overlap between neighboring hidden cells hides subpixel seams
 // between sheet rects when the camera sits on fractional coordinates
 const SHEET_OVERDRAW_PX = 0.5;
+// why: halo bands overdraw up to half a pixel past their cell edge, so
+// bite legs must extend by the same amount to swallow the remnants
+const BITE_PAD_PX = 0.5;
 
 const MINE_SPIKES: readonly (readonly [number, number])[] = [
   [-1, -1],
@@ -73,6 +76,8 @@ interface TileTerrain {
 }
 
 interface ConcavePaint {
+  readonly x: number;
+  readonly y: number;
   readonly sx: number;
   readonly sy: number;
   readonly size: number;
@@ -335,15 +340,28 @@ export class Renderer {
     const sx = (x - this.cameraX) * this.cellSize + this.canvas.clientWidth / 2;
     const sy =
       (y - this.cameraY) * this.cellSize + this.canvas.clientHeight / 2;
-    const anim = this.revealAnims.get(keyOf(x, y));
-    const progress =
-      anim === undefined
-        ? 1
-        : clamp01(
-            (performance.now() - anim.startTime - anim.delay) /
-              REVEAL_DURATION_MS,
-          );
+    const progress = this.revealProgressFor(keyOf(x, y));
     this.drawRevealed(x, y, sx, sy, size, progress);
+  }
+
+  private revealProgressFor(key: string): number {
+    const anim = this.revealAnims.get(key);
+    if (anim === undefined) return 1;
+    return clamp01(
+      (performance.now() - anim.startTime - anim.delay) / REVEAL_DURATION_MS,
+    );
+  }
+
+  // why: a concave corner comes into existence when the last of its three
+  // revealed cells settles, so the bite grows with the slowest of their
+  // reveal animations instead of popping in
+  private biteProgress(cells: readonly (readonly [number, number])[]): number {
+    let progress = 1;
+    for (const [x, y] of cells) {
+      const cellProgress = this.revealProgressFor(keyOf(x, y));
+      if (cellProgress < progress) progress = cellProgress;
+    }
+    return progress;
   }
 
   private drawRevealed(
@@ -376,7 +394,7 @@ export class Renderer {
     }
     this.ctx.globalAlpha = 1;
     if (hasConcaveCorner(terrain)) {
-      this.concavePaints.push({ sx, sy, size, terrain });
+      this.concavePaints.push({ x, y, sx, sy, size, terrain });
     }
   }
 
@@ -433,30 +451,83 @@ export class Renderer {
     if (this.concavePaints.length === 0) return;
     this.ctx.fillStyle = canvasPalette().revealed;
     for (const paint of this.concavePaints) {
-      const { sx, sy, size, terrain } = paint;
+      const { x, y, sx, sy, size, terrain } = paint;
       const right = sx + size + CELL_GAP;
       const bottom = sy + size + CELL_GAP;
       const radius = islandRadius(size);
       if (terrain.topLeft && !terrain.top && !terrain.left) {
-        this.paintConcaveBite(sx, sy, -1, -1, radius);
+        this.paintConcaveBite(
+          sx,
+          sy,
+          -1,
+          -1,
+          this.grownBiteRadius(radius, [
+            [x, y],
+            [x - 1, y],
+            [x, y - 1],
+          ]),
+        );
       }
       if (terrain.topRight && !terrain.top && !terrain.right) {
-        this.paintConcaveBite(right, sy, 1, -1, radius);
+        this.paintConcaveBite(
+          right,
+          sy,
+          1,
+          -1,
+          this.grownBiteRadius(radius, [
+            [x, y],
+            [x + 1, y],
+            [x, y - 1],
+          ]),
+        );
       }
       if (terrain.bottomRight && !terrain.right && !terrain.bottom) {
-        this.paintConcaveBite(right, bottom, 1, 1, radius);
+        this.paintConcaveBite(
+          right,
+          bottom,
+          1,
+          1,
+          this.grownBiteRadius(radius, [
+            [x, y],
+            [x + 1, y],
+            [x, y + 1],
+          ]),
+        );
       }
       if (terrain.bottomLeft && !terrain.left && !terrain.bottom) {
-        this.paintConcaveBite(sx, bottom, -1, 1, radius);
+        this.paintConcaveBite(
+          sx,
+          bottom,
+          -1,
+          1,
+          this.grownBiteRadius(radius, [
+            [x, y],
+            [x - 1, y],
+            [x, y + 1],
+          ]),
+        );
       }
     }
     this.concavePaints.length = 0;
   }
 
+  // why: linear growth matches the tile crossfade curve, so the bite
+  // materializes together with its neighboring tiles instead of racing
+  // ahead of them
+  private grownBiteRadius(
+    radius: number,
+    cells: readonly (readonly [number, number])[],
+  ): number {
+    return radius * this.biteProgress(cells);
+  }
+
   // algorithm: legs run from the two tangent points through the vertex,
   // then the arc (centered radius-deep inside the hidden cell) closes
   // the path — filling the crescent outside the arc rounds the sheet's
-  // corner with a concave curve instead of a convex bulge
+  // corner with a concave curve instead of a convex bulge. Legs sit on
+  // the adjacent TILE edges (tiles are inset on their right/bottom) and
+  // pad past them by BITE_PAD_PX so no halo band remnant stays wedged
+  // between the bite and the tiles.
   private paintConcaveBite(
     vx: number,
     vy: number,
@@ -464,15 +535,18 @@ export class Renderer {
     hy: number,
     radius: number,
   ): void {
+    if (radius < 0.5) return;
+    const legX = vx - (hx === 1 ? CELL_GAP : 0) - hx * BITE_PAD_PX;
+    const legY = vy - (hy === 1 ? CELL_GAP : 0) - hy * BITE_PAD_PX;
     const angleAtVertical = hx === 1 ? Math.PI : 0;
     const angleAtHorizontal = hy === 1 ? Math.PI * 1.5 : Math.PI * 0.5;
     this.ctx.beginPath();
-    this.ctx.moveTo(vx + hx * radius, vy);
-    this.ctx.lineTo(vx, vy);
-    this.ctx.lineTo(vx, vy + hy * radius);
+    this.ctx.moveTo(legX + hx * radius, legY);
+    this.ctx.lineTo(legX, legY);
+    this.ctx.lineTo(legX, legY + hy * radius);
     this.ctx.arc(
-      vx + hx * radius,
-      vy + hy * radius,
+      legX + hx * radius,
+      legY + hy * radius,
       radius,
       angleAtVertical,
       angleAtHorizontal,

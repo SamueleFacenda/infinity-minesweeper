@@ -167,6 +167,7 @@ main {
   height: 100%;
   cursor: pointer;
   touch-action: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .hidden {

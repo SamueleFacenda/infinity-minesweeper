@@ -17,6 +17,7 @@ import type { ThemeName } from "./theme.js";
 const DRAG_THRESHOLD_PX = 4;
 const ZOOM_STEP = 1.02;
 const LOSS_OVERLAY_DELAY_MS = 2000;
+const LONG_PRESS_MS = 500;
 
 interface Elements {
   canvas: HTMLCanvasElement;
@@ -50,6 +51,12 @@ class Game {
   private dragStart: { x: number; y: number } | null = null;
   private dragged = false;
   private lossOverlayTimeout: number | null = null;
+  private touchAnchor: { x: number; y: number } | null = null;
+  private touchLast: { x: number; y: number } = { x: 0, y: 0 };
+  private touchDragged = false;
+  private touchConsumed = false;
+  private longPressTimeout: number | null = null;
+  private pinchLast: { distance: number; x: number; y: number } | null = null;
   private theme: ThemeName;
   private accent: string;
   private accentDotButtons: HTMLButtonElement[] = [];
@@ -117,6 +124,37 @@ class Game {
       },
       { passive: false },
     );
+    // why: preventDefault on touchstart kills the browser's synthetic
+    // mouse events (stuck hover square, ghost reveals), the platform
+    // tap-highlight flash, and double-tap zoom
+    canvas.addEventListener(
+      "touchstart",
+      (event) => {
+        this.onTouchStart(event);
+      },
+      { passive: false },
+    );
+    canvas.addEventListener(
+      "touchmove",
+      (event) => {
+        this.onTouchMove(event);
+      },
+      { passive: false },
+    );
+    canvas.addEventListener(
+      "touchend",
+      (event) => {
+        this.onTouchEnd(event);
+      },
+      { passive: false },
+    );
+    canvas.addEventListener(
+      "touchcancel",
+      () => {
+        this.onTouchCancel();
+      },
+      { passive: false },
+    );
     window.addEventListener("resize", () => {
       this.onResize();
     });
@@ -178,11 +216,12 @@ class Game {
   }
 
   private cellFromEvent(event: MouseEvent): Cell {
+    return this.cellFromPoint(event.clientX, event.clientY);
+  }
+
+  private cellFromPoint(clientX: number, clientY: number): Cell {
     const rect = this.elements.canvas.getBoundingClientRect();
-    return this.renderer.screenToCell(
-      event.clientX - rect.left,
-      event.clientY - rect.top,
-    );
+    return this.renderer.screenToCell(clientX - rect.left, clientY - rect.top);
   }
 
   private onMouseDown(event: MouseEvent): void {
@@ -231,8 +270,11 @@ class Game {
 
   private onContextMenu(event: MouseEvent): void {
     event.preventDefault();
+    this.toggleFlagAt(this.cellFromEvent(event));
+  }
+
+  private toggleFlagAt(cell: Cell): void {
     if (this.board.status !== "playing") return;
-    const cell = this.cellFromEvent(event);
     const wasFlagged = this.board.isFlagged(cell.x, cell.y);
     this.board.toggleFlag(cell.x, cell.y);
     const isFlagged = this.board.isFlagged(cell.x, cell.y);
@@ -242,6 +284,134 @@ class Game {
     this.renderer.hintCell = null;
     this.updateStats();
     this.renderer.requestDraw();
+  }
+
+  private onTouchStart(event: TouchEvent): void {
+    event.preventDefault();
+    this.renderer.hoverCell = null;
+    this.pinchLast = null;
+    if (event.touches.length === 1) {
+      const touch = event.touches[0];
+      if (touch === undefined) return;
+      this.touchAnchor = { x: touch.clientX, y: touch.clientY };
+      this.touchLast = { x: touch.clientX, y: touch.clientY };
+      this.touchDragged = false;
+      this.touchConsumed = false;
+      this.longPressTimeout = window.setTimeout(() => {
+        this.longPressTimeout = null;
+        this.onLongPress();
+      }, LONG_PRESS_MS);
+    } else {
+      this.cancelLongPress();
+      this.touchConsumed = true;
+      this.touchAnchor = null;
+    }
+  }
+
+  private onTouchMove(event: TouchEvent): void {
+    event.preventDefault();
+    if (event.touches.length === 2) {
+      this.pinch(event.touches);
+      return;
+    }
+    if (event.touches.length !== 1 || this.touchAnchor === null) return;
+    const touch = event.touches[0];
+    if (touch === undefined) return;
+    if (!this.touchDragged) {
+      const totalX = touch.clientX - this.touchAnchor.x;
+      const totalY = touch.clientY - this.touchAnchor.y;
+      if (Math.hypot(totalX, totalY) > DRAG_THRESHOLD_PX) {
+        this.touchDragged = true;
+        this.cancelLongPress();
+      }
+    }
+    if (this.touchDragged) {
+      this.renderer.panBy(
+        touch.clientX - this.touchLast.x,
+        touch.clientY - this.touchLast.y,
+      );
+      this.renderer.requestDraw();
+    }
+    this.touchLast = { x: touch.clientX, y: touch.clientY };
+  }
+
+  private onTouchEnd(event: TouchEvent): void {
+    event.preventDefault();
+    this.cancelLongPress();
+    if (event.touches.length > 0) {
+      this.touchConsumed = true;
+      this.touchDragged = true;
+      this.touchAnchor = null;
+      this.pinchLast = null;
+      const touch = event.touches[0];
+      if (touch !== undefined) {
+        this.touchLast = { x: touch.clientX, y: touch.clientY };
+      }
+      return;
+    }
+    const anchor = this.touchAnchor;
+    if (anchor !== null && !this.touchDragged && !this.touchConsumed) {
+      this.toggleFlagAt(this.cellFromPoint(anchor.x, anchor.y));
+    }
+    this.touchAnchor = null;
+    this.touchDragged = false;
+    this.touchConsumed = false;
+    this.pinchLast = null;
+  }
+
+  private onTouchCancel(): void {
+    this.cancelLongPress();
+    this.touchAnchor = null;
+    this.touchDragged = false;
+    this.touchConsumed = false;
+    this.pinchLast = null;
+  }
+
+  private onLongPress(): void {
+    const anchor = this.touchAnchor;
+    if (anchor === null) return;
+    this.touchConsumed = true;
+    this.touchDragged = true;
+    // why: lib.dom declares vibrate unconditionally, but desktop
+    // browsers ship without it
+    (navigator as { vibrate?: (pattern: number) => boolean }).vibrate?.(30);
+    this.clickCell(this.cellFromPoint(anchor.x, anchor.y));
+  }
+
+  private cancelLongPress(): void {
+    if (this.longPressTimeout === null) return;
+    window.clearTimeout(this.longPressTimeout);
+    this.longPressTimeout = null;
+  }
+
+  private pinch(touches: TouchList): void {
+    const first = touches[0];
+    const second = touches[1];
+    if (first === undefined || second === undefined) return;
+    const midX = (first.clientX + second.clientX) / 2;
+    const midY = (first.clientY + second.clientY) / 2;
+    const distance = Math.hypot(
+      first.clientX - second.clientX,
+      first.clientY - second.clientY,
+    );
+    const last = this.pinchLast;
+    if (last !== null && last.distance > 0 && distance > 0) {
+      this.renderer.panBy(midX - last.x, midY - last.y);
+      this.renderer.zoomAt(
+        ...this.zoomArgs(midX, midY, distance / last.distance),
+      );
+      this.renderer.requestDraw();
+    }
+    this.pinchLast = { distance, x: midX, y: midY };
+  }
+
+  private zoomArgs(
+    clientX: number,
+    clientY: number,
+    factor: number,
+  ): [number, number, number] {
+    const rect = this.elements.canvas.getBoundingClientRect();
+    return [clientX - rect.left, clientY - rect.top, factor];
   }
 
   private onWheel(event: WheelEvent): void {

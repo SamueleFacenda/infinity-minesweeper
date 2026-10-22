@@ -23,8 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Island edge cleanup: the border zone around discovered tiles is filled with the accent sheet (no dark background strips or squared corners at the island outline) and concave corners — three revealed cells meeting one hidden cell — are smoothed by a dark crescent that rounds the sheet's corner with a concave arc tangent to both border edges, so every island corner is rounded
 - Loss screen taunts: random insult message from a 40-entry list
 - Board inspection after loss: "Inspect board" button hides the overlay so the final board can be panned and zoomed; wrong flags are crossed out in red
+- SVG favicon: spiky mine on the dark game background
 
 ### Changed
+
+- Pan/zoom input redraws coalesce into one canvas draw per animation frame instead of one per mouse event; mines render from a cached hi-dpi sprite, keeping board inspection smooth after loss
 
 - Loss sequence pacing: slower reveal ripple (600ms wave, 50ms stagger), 1.2s explosion ring, ~2s unobstructed board view before the end screen fades in over 900ms; the hold is skipped under `prefers-reduced-motion`
 

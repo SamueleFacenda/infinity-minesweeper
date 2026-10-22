@@ -1,6 +1,7 @@
 import type { Board } from "./game/board.js";
 import type { Cell } from "./game/coords.js";
 import { keyOf } from "./game/coords.js";
+import type { CanvasPalette } from "./theme.js";
 import { canvasPalette } from "./theme.js";
 
 // Canvas renderer for a window of the infinite board. Camera keeps world
@@ -22,6 +23,17 @@ const ISLAND_CORNER_RADIUS_RATIO = 0.4;
 // why: overlap between neighboring hidden cells hides subpixel seams
 // between sheet rects when the camera sits on fractional coordinates
 const SHEET_OVERDRAW_PX = 0.5;
+
+const MINE_SPIKES: readonly (readonly [number, number])[] = [
+  [-1, -1],
+  [1, -1],
+  [-1, 1],
+  [1, 1],
+  [0, -1],
+  [0, 1],
+  [-1, 0],
+  [1, 0],
+];
 
 const REVEAL_DURATION_MS = 300;
 const REVEAL_STAGGER_MS = 50;
@@ -67,6 +79,13 @@ interface ConcavePaint {
   readonly terrain: TileTerrain;
 }
 
+interface MineSprite {
+  readonly cellSize: number;
+  readonly colors: string;
+  readonly ratio: number;
+  readonly canvas: HTMLCanvasElement;
+}
+
 export class Renderer {
   cellSize = 30;
   cameraX = 0;
@@ -79,6 +98,8 @@ export class Renderer {
   private readonly concavePaints: ConcavePaint[] = [];
   private lossAnim: LossAnimation | null = null;
   private animFrame: number | null = null;
+  private drawPending = false;
+  private mineSprite: MineSprite | null = null;
   readonly reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
     .matches;
 
@@ -141,7 +162,7 @@ export class Renderer {
         delay: distance * REVEAL_STAGGER_MS,
       });
     }
-    this.scheduleAnimationLoop();
+    this.scheduleAnimationFrame();
   }
 
   animateFlagRaise(cells: readonly (readonly [number, number])[]) {
@@ -150,7 +171,7 @@ export class Renderer {
     for (const [x, y] of cells) {
       this.flagAnims.set(keyOf(x, y), { placing: true, startTime });
     }
-    this.scheduleAnimationLoop();
+    this.scheduleAnimationFrame();
   }
 
   animateFlagToggle(cell: Cell, placing: boolean) {
@@ -159,13 +180,13 @@ export class Renderer {
       placing,
       startTime: performance.now(),
     });
-    this.scheduleAnimationLoop();
+    this.scheduleAnimationFrame();
   }
 
   animateLoss(cell: Cell) {
     if (this.reducedMotion) return;
     this.lossAnim = { cell, startTime: performance.now() };
-    this.scheduleAnimationLoop();
+    this.scheduleAnimationFrame();
   }
 
   screenToCell(px: number, py: number): Cell {
@@ -206,24 +227,31 @@ export class Renderer {
     this.cameraY = cell.y;
   }
 
-  private scheduleAnimationLoop(): void {
-    if (this.reducedMotion || this.animFrame !== null) return;
+  // why: high-polling mice fire mousemove far faster than the display
+  // refreshes; coalescing input redraws into the shared animation loop
+  // keeps one draw per frame regardless of event rate
+  requestDraw(): void {
+    this.drawPending = true;
+    this.scheduleAnimationFrame();
+  }
+
+  private scheduleAnimationFrame(): void {
+    if (this.animFrame !== null) return;
     this.animFrame = requestAnimationFrame(() => {
-      this.animFrame = null;
-      this.pruneAnimations(performance.now());
-      if (
-        this.revealAnims.size === 0 &&
-        this.flagAnims.size === 0 &&
-        this.lossAnim === null
-      ) {
-        return;
-      }
-      this.draw();
-      this.scheduleAnimationLoop();
+      this.onAnimationFrame();
     });
   }
 
-  private pruneAnimations(now: number): void {
+  private onAnimationFrame(): void {
+    this.animFrame = null;
+    const animationsActive = this.pruneAnimations(performance.now());
+    if (!animationsActive && !this.drawPending) return;
+    this.drawPending = false;
+    this.draw();
+    this.scheduleAnimationFrame();
+  }
+
+  private pruneAnimations(now: number): boolean {
     for (const [key, anim] of this.revealAnims) {
       if (now - anim.startTime - anim.delay >= REVEAL_DURATION_MS) {
         this.revealAnims.delete(key);
@@ -240,6 +268,11 @@ export class Renderer {
     ) {
       this.lossAnim = null;
     }
+    return (
+      this.revealAnims.size > 0 ||
+      this.flagAnims.size > 0 ||
+      this.lossAnim !== null
+    );
   }
 
   private drawSheetCell(x: number, y: number): void {
@@ -614,49 +647,29 @@ export class Renderer {
       this.ctx.roundRect(sx, sy, size, size, tileRadius(size));
       this.ctx.stroke();
     }
-    // why: when the accent equals the theme's mine red the body would
-    // vanish into the sheet, so fall back to the darkest theme color
-    const bodyColor =
-      palette.mine.toLowerCase() === palette.hidden.toLowerCase()
-        ? palette.grid
-        : palette.mine;
-    const cx = sx + size / 2;
-    const cy = sy + size / 2;
-    const radius = size * 0.22;
-    this.ctx.fillStyle = bodyColor;
-    this.ctx.beginPath();
-    this.ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    this.ctx.fill();
-    this.ctx.strokeStyle = palette.grid;
-    this.ctx.lineWidth = Math.max(1.2, size * 0.05);
-    this.ctx.stroke();
-    this.ctx.fillStyle = palette.flagPole;
-    this.ctx.beginPath();
-    this.ctx.arc(
-      cx - radius * 0.35,
-      cy - radius * 0.35,
-      radius * 0.28,
-      0,
-      Math.PI * 2,
-    );
-    this.ctx.fill();
-    this.ctx.strokeStyle = bodyColor;
-    this.ctx.lineWidth = Math.max(1.2, size * 0.05);
-    for (const [dx, dy] of [
-      [-1, -1],
-      [1, -1],
-      [-1, 1],
-      [1, 1],
-      [0, -1],
-      [0, 1],
-      [-1, 0],
-      [1, 0],
-    ] as const) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(cx - dx * radius, cy - dy * radius);
-      this.ctx.lineTo(cx + dx * radius * 1.6, cy + dy * radius * 1.6);
-      this.ctx.stroke();
+    const sprite = this.mineSpriteFor(size, palette);
+    this.ctx.drawImage(sprite, sx, sy, size, size);
+  }
+
+  // why: after loss the viewport can hold thousands of mines; a cached
+  // raster replaces a dozen path operations per mine with one drawImage
+  private mineSpriteFor(
+    size: number,
+    palette: CanvasPalette,
+  ): HTMLCanvasElement {
+    const ratio = window.devicePixelRatio;
+    const colors = mineSpriteColors(palette);
+    const current = this.mineSprite;
+    if (
+      current?.cellSize === this.cellSize &&
+      current.colors === colors &&
+      current.ratio === ratio
+    ) {
+      return current.canvas;
     }
+    const canvas = buildMineSprite(size, palette, ratio);
+    this.mineSprite = { cellSize: this.cellSize, colors, ratio, canvas };
+    return canvas;
   }
 
   private drawLossRing(): void {
@@ -717,6 +730,81 @@ function tileRadii(
     terrain.right && terrain.bottom ? island : interior,
     terrain.left && terrain.bottom ? island : interior,
   ];
+}
+
+function buildMineSprite(
+  size: number,
+  palette: CanvasPalette,
+  ratio: number,
+): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(size * ratio);
+  canvas.height = Math.ceil(size * ratio);
+  const ctx = canvas.getContext("2d");
+  if (ctx === null) throw new Error("sprite 2d context unavailable");
+  ctx.scale(ratio, ratio);
+  paintMine(ctx, size, palette);
+  return canvas;
+}
+
+function paintMine(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  palette: CanvasPalette,
+): void {
+  const body = mineBodyColor(palette);
+  const cx = size / 2;
+  const cy = size / 2;
+  const radius = size * 0.22;
+  const lineWidth = Math.max(1.2, size * 0.05);
+  ctx.fillStyle = body;
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = palette.grid;
+  ctx.lineWidth = lineWidth;
+  ctx.stroke();
+  ctx.fillStyle = palette.flagPole;
+  ctx.beginPath();
+  ctx.arc(
+    cx - radius * 0.35,
+    cy - radius * 0.35,
+    radius * 0.28,
+    0,
+    Math.PI * 2,
+  );
+  ctx.fill();
+  paintMineSpikes(ctx, cx, cy, radius, lineWidth, body);
+}
+
+function paintMineSpikes(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  radius: number,
+  lineWidth: number,
+  color: string,
+): void {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
+  for (const [dx, dy] of MINE_SPIKES) {
+    ctx.beginPath();
+    ctx.moveTo(cx - dx * radius, cy - dy * radius);
+    ctx.lineTo(cx + dx * radius * 1.6, cy + dy * radius * 1.6);
+    ctx.stroke();
+  }
+}
+
+// why: when the accent equals the theme's mine red the body would
+// vanish into the sheet, so fall back to the darkest theme color
+function mineBodyColor(palette: CanvasPalette): string {
+  return palette.mine.toLowerCase() === palette.hidden.toLowerCase()
+    ? palette.grid
+    : palette.mine;
+}
+
+function mineSpriteColors(palette: CanvasPalette): string {
+  return `${mineBodyColor(palette)}/${palette.grid}/${palette.flagPole}`;
 }
 
 function tileRadius(size: number): number {

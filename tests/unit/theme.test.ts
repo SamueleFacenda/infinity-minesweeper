@@ -74,12 +74,28 @@ describe("loadThemeSettings", () => {
     const storage = new MemoryStorage();
     storage.setItem(
       "infinite-minesweeper.theme.v1",
-      JSON.stringify({ theme: "charcoal", accent: "#a3be8c" }),
+      JSON.stringify({ theme: "charcoal", accent: "#a3be8c", flagFirst: true }),
     );
     expect(loadThemeSettings(storage)).toEqual({
       theme: "charcoal",
       accent: "#a3be8c",
+      flagFirst: true,
     });
+  });
+
+  it("returns flagFirst undefined when absent, true and false when set", () => {
+    expect(loadThemeSettings(new MemoryStorage()).flagFirst).toBeUndefined();
+    const storage = new MemoryStorage();
+    storage.setItem(
+      "infinite-minesweeper.theme.v1",
+      JSON.stringify({ flagFirst: false }),
+    );
+    expect(loadThemeSettings(storage).flagFirst).toBe(false);
+    storage.setItem(
+      "infinite-minesweeper.theme.v1",
+      JSON.stringify({ flagFirst: "yes" }),
+    );
+    expect(loadThemeSettings(storage).flagFirst).toBeUndefined();
   });
 
   it("ignores corrupt or invalid data", () => {
@@ -110,21 +126,22 @@ function stubDocument(): Document {
 describe("applyTheme", () => {
   it("updates the canvas palette and accent, and persists", () => {
     const storage = new MemoryStorage();
-    applyTheme("charcoal", "#d08770", stubDocument(), storage);
+    applyTheme("charcoal", "#d08770", true, stubDocument(), storage);
     expect(canvasPalette().background).toBe(THEMES.charcoal.canvas.background);
     expect(canvasPalette().hidden).toBe("#d08770");
     expect(accentColor()).toBe("#d08770");
     expect(loadThemeSettings(storage)).toEqual({
       theme: "charcoal",
       accent: "#d08770",
+      flagFirst: true,
     });
-    applyTheme("nord", "#88c0d0", stubDocument(), new MemoryStorage());
+    applyTheme("nord", "#88c0d0", false, stubDocument(), new MemoryStorage());
     expect(canvasPalette().background).toBe(THEMES.nord.canvas.background);
     expect(canvasPalette().hidden).toBe("#88c0d0");
   });
 
   it("falls back to the theme default for an invalid accent", () => {
-    applyTheme("nord", "#123456", stubDocument(), new MemoryStorage());
+    applyTheme("nord", "#123456", false, stubDocument(), new MemoryStorage());
     expect(accentColor()).toBe(THEMES.nord.defaultAccent);
   });
 });

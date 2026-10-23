@@ -17,7 +17,9 @@ import type { ThemeName } from "./theme.js";
 const DRAG_THRESHOLD_PX = 4;
 const ZOOM_STEP = 1.02;
 const LOSS_OVERLAY_DELAY_MS = 2000;
-const LONG_PRESS_MS = 500;
+// why: browsers "should" not fire synthetic mouse events after a
+// canceled touchend (W3C touch events), but the guard is cheap insurance
+const MOUSE_SUPPRESS_AFTER_TOUCH_MS = 250;
 
 interface Elements {
   canvas: HTMLCanvasElement;
@@ -29,6 +31,7 @@ interface Elements {
   leaderboard: HTMLButtonElement;
   newGame: HTMLButtonElement;
   theme: HTMLButtonElement;
+  clickMode: HTMLButtonElement;
   accentDots: HTMLElement;
   overlay: HTMLDivElement;
   overlayTitle: HTMLElement;
@@ -55,8 +58,10 @@ class Game {
   private touchLast: { x: number; y: number } = { x: 0, y: 0 };
   private touchDragged = false;
   private touchConsumed = false;
-  private longPressTimeout: number | null = null;
+  private touchActive = false;
   private pinchLast: { distance: number; x: number; y: number } | null = null;
+  private lastTouchAt = 0;
+  private flagFirst: boolean;
   private theme: ThemeName;
   private accent: string;
   private accentDotButtons: HTMLButtonElement[] = [];
@@ -72,6 +77,7 @@ class Game {
     this.accent = settings.accent;
     this.board = this.newBoard();
     this.renderer = new Renderer(this.elements.canvas, ctx, this.board);
+    this.flagFirst = settings.flagFirst ?? this.renderer.coarsePointer;
     this.buildAccentDots();
     this.applyAppearance();
     this.populateDifficulties();
@@ -124,15 +130,15 @@ class Game {
       },
       { passive: false },
     );
-    // why: preventDefault on touchstart kills the browser's synthetic
-    // mouse events (stuck hover square, ghost reveals), the platform
-    // tap-highlight flash, and double-tap zoom
+    // why: touchstart keeps its default behavior so the platform
+    // long-press can fire contextmenu; touchmove/touchend preventDefault
+    // suppresses the synthetic mouse sequence (stuck hover, ghost clicks)
     canvas.addEventListener(
       "touchstart",
       (event) => {
         this.onTouchStart(event);
       },
-      { passive: false },
+      { passive: true },
     );
     canvas.addEventListener(
       "touchmove",
@@ -186,12 +192,30 @@ class Game {
       this.theme = this.theme === "nord" ? "charcoal" : "nord";
       this.applyAppearance();
     });
+    this.elements.clickMode.addEventListener("click", () => {
+      this.onToggleClickMode();
+    });
+  }
+
+  private onToggleClickMode(): void {
+    this.flagFirst = !this.flagFirst;
+    this.applyAppearance();
   }
 
   private applyAppearance(): void {
-    applyTheme(this.theme, this.accent, document, window.localStorage);
+    applyTheme(
+      this.theme,
+      this.accent,
+      this.flagFirst,
+      document,
+      window.localStorage,
+    );
     this.elements.theme.textContent =
       this.theme === "nord" ? "Nord" : "Charcoal";
+    this.elements.clickMode.setAttribute(
+      "aria-pressed",
+      this.flagFirst ? "true" : "false",
+    );
     for (const dot of this.accentDotButtons) {
       dot.classList.toggle("selected", dot.dataset.accent === this.accent);
     }
@@ -225,6 +249,7 @@ class Game {
   }
 
   private onMouseDown(event: MouseEvent): void {
+    if (this.touchRecently()) return;
     if (event.button === 0) {
       this.dragStart = { x: event.clientX, y: event.clientY };
       this.dragged = false;
@@ -232,6 +257,7 @@ class Game {
   }
 
   private onMouseMove(event: MouseEvent): void {
+    if (this.touchRecently()) return;
     const rect = this.elements.canvas.getBoundingClientRect();
     const cell = this.renderer.screenToCell(
       event.clientX - rect.left,
@@ -254,11 +280,12 @@ class Game {
   }
 
   private onMouseUp(event: MouseEvent): void {
+    if (this.touchRecently()) return;
     if (event.button !== 0 || this.dragStart === null) return;
     const wasDrag = this.dragged;
     this.dragStart = null;
     this.dragged = false;
-    if (!wasDrag) this.clickCell(this.cellFromEvent(event));
+    if (!wasDrag) this.onPrimary(this.cellFromEvent(event));
   }
 
   private onMouseLeave(): void {
@@ -268,9 +295,38 @@ class Game {
     this.renderer.requestDraw();
   }
 
+  // ponytail: the platform contextmenu event doubles as the mobile
+  // long-press; browsers that never fire it (MDN: limited availability)
+  // lose the secondary action — re-add a 500ms timer here if that bites
   private onContextMenu(event: MouseEvent): void {
     event.preventDefault();
-    this.toggleFlagAt(this.cellFromEvent(event));
+    if (this.touchActive) {
+      if (this.touchDragged || this.touchConsumed) return;
+      this.touchConsumed = true;
+      this.vibrate();
+    }
+    this.onSecondary(this.cellFromEvent(event));
+  }
+
+  private onPrimary(cell: Cell): void {
+    if (this.board.isRevealed(cell.x, cell.y)) this.clickCell(cell);
+    else if (this.flagFirst) this.toggleFlagAt(cell);
+    else this.clickCell(cell);
+  }
+
+  private onSecondary(cell: Cell): void {
+    if (this.flagFirst) this.clickCell(cell);
+    else this.toggleFlagAt(cell);
+  }
+
+  private vibrate(): void {
+    // why: lib.dom declares vibrate unconditionally, but desktop
+    // browsers ship without it
+    (navigator as { vibrate?: (pattern: number) => boolean }).vibrate?.(30);
+  }
+
+  private touchRecently(): boolean {
+    return performance.now() - this.lastTouchAt < MOUSE_SUPPRESS_AFTER_TOUCH_MS;
   }
 
   private toggleFlagAt(cell: Cell): void {
@@ -287,9 +343,10 @@ class Game {
   }
 
   private onTouchStart(event: TouchEvent): void {
-    event.preventDefault();
+    this.lastTouchAt = performance.now();
     this.renderer.hoverCell = null;
     this.pinchLast = null;
+    this.touchActive = true;
     if (event.touches.length === 1) {
       const touch = event.touches[0];
       if (touch === undefined) return;
@@ -297,18 +354,16 @@ class Game {
       this.touchLast = { x: touch.clientX, y: touch.clientY };
       this.touchDragged = false;
       this.touchConsumed = false;
-      this.longPressTimeout = window.setTimeout(() => {
-        this.longPressTimeout = null;
-        this.onLongPress();
-      }, LONG_PRESS_MS);
     } else {
-      this.cancelLongPress();
       this.touchConsumed = true;
       this.touchAnchor = null;
     }
   }
 
   private onTouchMove(event: TouchEvent): void {
+    this.lastTouchAt = performance.now();
+    // why: canceling the first touchmove of the series suppresses the
+    // synthetic mouse sequence (MDN touch events) and blocks scrolling
     event.preventDefault();
     if (event.touches.length === 2) {
       this.pinch(event.touches);
@@ -322,7 +377,6 @@ class Game {
       const totalY = touch.clientY - this.touchAnchor.y;
       if (Math.hypot(totalX, totalY) > DRAG_THRESHOLD_PX) {
         this.touchDragged = true;
-        this.cancelLongPress();
       }
     }
     if (this.touchDragged) {
@@ -336,11 +390,14 @@ class Game {
   }
 
   private onTouchEnd(event: TouchEvent): void {
+    this.lastTouchAt = performance.now();
+    // why: a canceled touchend must not become a click or fire any
+    // consequential mouse event (W3C touch events), so a tap can't
+    // ghost a reveal through the mouse handlers
     event.preventDefault();
-    this.cancelLongPress();
     if (event.touches.length > 0) {
-      this.touchConsumed = true;
       this.touchDragged = true;
+      this.touchConsumed = true;
       this.touchAnchor = null;
       this.pinchLast = null;
       const touch = event.touches[0];
@@ -349,9 +406,10 @@ class Game {
       }
       return;
     }
+    this.touchActive = false;
     const anchor = this.touchAnchor;
     if (anchor !== null && !this.touchDragged && !this.touchConsumed) {
-      this.toggleFlagAt(this.cellFromPoint(anchor.x, anchor.y));
+      this.onPrimary(this.cellFromPoint(anchor.x, anchor.y));
     }
     this.touchAnchor = null;
     this.touchDragged = false;
@@ -360,28 +418,12 @@ class Game {
   }
 
   private onTouchCancel(): void {
-    this.cancelLongPress();
+    this.lastTouchAt = performance.now();
+    this.touchActive = false;
     this.touchAnchor = null;
     this.touchDragged = false;
     this.touchConsumed = false;
     this.pinchLast = null;
-  }
-
-  private onLongPress(): void {
-    const anchor = this.touchAnchor;
-    if (anchor === null) return;
-    this.touchConsumed = true;
-    this.touchDragged = true;
-    // why: lib.dom declares vibrate unconditionally, but desktop
-    // browsers ship without it
-    (navigator as { vibrate?: (pattern: number) => boolean }).vibrate?.(30);
-    this.clickCell(this.cellFromPoint(anchor.x, anchor.y));
-  }
-
-  private cancelLongPress(): void {
-    if (this.longPressTimeout === null) return;
-    window.clearTimeout(this.longPressTimeout);
-    this.longPressTimeout = null;
   }
 
   private pinch(touches: TouchList): void {
@@ -692,6 +734,7 @@ const elements: Elements = {
   leaderboard: requireElement("btn-leaderboard", HTMLButtonElement),
   newGame: requireElement("btn-new", HTMLButtonElement),
   theme: requireElement("btn-theme", HTMLButtonElement),
+  clickMode: requireElement("btn-clickmode", HTMLButtonElement),
   accentDots: requireElement("accent-dots", HTMLElement),
   overlay: requireElement("overlay", HTMLDivElement),
   overlayTitle: requireElement("overlay-title", HTMLElement),

@@ -11,6 +11,7 @@ import type { RunRecord } from "./game/leaderboard.js";
 import { Leaderboard } from "./game/leaderboard.js";
 import { randomTaunt } from "./game/taunts.js";
 import { Renderer } from "./render.js";
+import { playFlagSound, playLossSound, playRevealSound } from "./sound.js";
 import { ACCENTS, applyTheme, loadThemeSettings } from "./theme.js";
 import type { ThemeName } from "./theme.js";
 
@@ -336,6 +337,7 @@ class Game {
     const isFlagged = this.board.isFlagged(cell.x, cell.y);
     if (isFlagged !== wasFlagged) {
       this.renderer.animateFlagToggle(cell, isFlagged);
+      playFlagSound(isFlagged);
     }
     this.renderer.hintCell = null;
     this.updateStats();
@@ -517,14 +519,17 @@ class Game {
     this.updateStats();
     if (this.board.lastFlagged.length > 0) {
       this.renderer.animateFlagRaise(this.board.lastFlagged);
+      playFlagSound(true);
     }
     if (result === "ok" && this.board.lastRevealed.length > 0) {
       this.renderer.animateReveal(this.board.lastRevealed, origin);
+      playRevealSound(this.board.lastRevealed.length);
     }
     this.renderer.draw();
     if (result === "lost") {
       const explodedAt = this.board.explodedAt;
       if (explodedAt !== null) this.renderer.animateLoss(explodedAt);
+      playLossSound();
       this.scheduleLossOverlay();
     }
   }

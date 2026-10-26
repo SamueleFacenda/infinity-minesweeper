@@ -23,17 +23,9 @@ const ISLAND_CORNER_RADIUS_RATIO = 0.4;
 // why: overlap between neighboring hidden cells hides subpixel seams
 // between sheet rects when the camera sits on fractional coordinates
 const SHEET_OVERDRAW_PX = 0.5;
-// why: tiles draw a quarter pixel off the cell grid so every tile edge
-// lands on a subpixel boundary — canvas then antialiases dark/accent
-// borders uniformly at every zoom, instead of razor-sharp pixel-aligned
-// lines appearing at integer zoom levels
-const TILE_OFFSET_PX = 0.25;
 // why: halo bands and the sheet share the accent color, so a concave
 // corner needs no accent rim — the grout pocket fills the rounded
 // corner all the way to its arc and meets the sheet directly
-// why: band ends stop this far from a concave vertex so their overdraw
-// cannot stack over the flanking tile's corner notch
-const BAND_TRIM_PX = 2;
 
 const MINE_SPIKES: readonly (readonly [number, number])[] = [
   [-1, -1],
@@ -109,6 +101,8 @@ export class Renderer {
   private readonly revealAnims = new Map<string, RevealAnimation>();
   private readonly flagAnims = new Map<string, FlagAnimation>();
   private readonly concavePaints: ConcavePaint[] = [];
+  private readonly snapXs = new Map<number, number>();
+  private readonly snapYs = new Map<number, number>();
   private lossAnim: LossAnimation | null = null;
   private animFrame: number | null = null;
   private drawPending = false;
@@ -144,6 +138,12 @@ export class Renderer {
     const palette = canvasPalette();
     this.ctx.fillStyle = palette.background;
     this.ctx.fillRect(0, 0, width, height);
+    // why: cell lines snap to a half-device-pixel lattice so every tile
+    // and band edge is antialiased at every zoom and pixel ratio —
+    // camera phases that align edges with device pixels otherwise
+    // render isolated razor-sharp accent lines
+    this.snapXs.clear();
+    this.snapYs.clear();
     const originX = Math.floor(this.cameraX - width / (2 * this.cellSize));
     const originY = Math.floor(this.cameraY - height / (2 * this.cellSize));
     const spanX = Math.ceil(width / this.cellSize) + 2;
@@ -297,17 +297,23 @@ export class Renderer {
   }
 
   private drawSheetCell(x: number, y: number): void {
-    const sx = (x - this.cameraX) * this.cellSize + this.canvas.clientWidth / 2;
-    const sy =
-      (y - this.cameraY) * this.cellSize + this.canvas.clientHeight / 2;
+    const sx = this.snapX(x);
+    const sy = this.snapY(y);
+    const cellW = this.snapX(x + 1) - sx;
+    const cellH = this.snapY(y + 1) - sy;
     const board = this.board;
     const key = keyOf(x, y);
     this.ctx.fillStyle = canvasPalette().hidden;
+    // why: unconditional overlap gives every shared sheet edge full pixel
+    // coverage — partial overdraw leaves a few percent of background
+    // bleed on lattice-snapped edges, reading as a faint per-cell grid.
+    // Overdraw into revealed cells lands under their halo bands; the
+    // grout pocket painted last owns the concave vertex zones.
     this.ctx.fillRect(
       sx - SHEET_OVERDRAW_PX,
       sy - SHEET_OVERDRAW_PX,
-      this.cellSize + SHEET_OVERDRAW_PX * 2,
-      this.cellSize + SHEET_OVERDRAW_PX * 2,
+      cellW + SHEET_OVERDRAW_PX * 2,
+      cellH + SHEET_OVERDRAW_PX * 2,
     );
     const hovered =
       this.hoverCell !== null &&
@@ -352,18 +358,37 @@ export class Renderer {
   }
 
   private drawCell(x: number, y: number): void {
-    const size = this.cellSize - CELL_GAP;
-    const sx = (x - this.cameraX) * this.cellSize + this.canvas.clientWidth / 2;
-    const sy =
-      (y - this.cameraY) * this.cellSize + this.canvas.clientHeight / 2;
+    const sx = this.snapX(x);
+    const sy = this.snapY(y);
+    const size = this.snapX(x + 1) - sx - CELL_GAP;
     const progress = this.revealProgressFor(keyOf(x, y));
-    // why: the quarter-pixel offset keeps every tile edge on a subpixel
-    // boundary so canvas AA softens dark/accent transitions identically
-    // at every zoom — pixel-aligned edges otherwise render as razor-sharp
-    // accent lines at integer zoom levels
-    const tsx = sx + TILE_OFFSET_PX;
-    const tsy = sy + TILE_OFFSET_PX;
-    this.drawRevealed(x, y, tsx, tsy, size, progress);
+    this.drawRevealed(x, y, sx, sy, size, progress);
+  }
+
+  // why: cell lines snap to half-device-pixel coordinates; per-cell sizes
+  // vary by at most one device pixel, which no rendered element reveals
+  private snapX(cellIndex: number): number {
+    let snapped = this.snapXs.get(cellIndex);
+    if (snapped === undefined) {
+      const raw =
+        (cellIndex - this.cameraX) * this.cellSize +
+        this.canvas.clientWidth / 2;
+      snapped = snapToLattice(raw, this.canvas);
+      this.snapXs.set(cellIndex, snapped);
+    }
+    return snapped;
+  }
+
+  private snapY(cellIndex: number): number {
+    let snapped = this.snapYs.get(cellIndex);
+    if (snapped === undefined) {
+      const raw =
+        (cellIndex - this.cameraY) * this.cellSize +
+        this.canvas.clientHeight / 2;
+      snapped = snapToLattice(raw, this.canvas);
+      this.snapYs.set(cellIndex, snapped);
+    }
+    return snapped;
   }
 
   private revealProgressFor(key: string): number {
@@ -394,10 +419,8 @@ export class Renderer {
     size: number,
     progress: number,
   ): void {
-    const csx = tsx - TILE_OFFSET_PX;
-    const csy = tsy - TILE_OFFSET_PX;
     if (progress <= 0) {
-      this.drawSheetRect(csx, csy, size + CELL_GAP);
+      this.drawSheetRect(tsx, tsy, size + CELL_GAP);
       return;
     }
     const terrain = this.tileTerrain(x, y);
@@ -407,7 +430,7 @@ export class Renderer {
     this.ctx.globalAlpha = progress;
     this.drawNumber(x, y, tsx, tsy, size);
     this.ctx.globalAlpha = 1 - progress;
-    this.drawSheetRect(csx, csy, size + CELL_GAP);
+    this.drawSheetRect(tsx, tsy, size + CELL_GAP);
     const flash = progress * (1 - progress) * 4 * 0.22;
     if (flash > 0.01) {
       this.ctx.globalAlpha = flash;
@@ -418,20 +441,13 @@ export class Renderer {
     }
     this.ctx.globalAlpha = 1;
     if (hasConcaveCorner(terrain)) {
-      this.concavePaints.push({ x, y, sx: csx, sy: csy, size, terrain });
+      this.concavePaints.push({ x, y, sx: tsx, sy: tsy, size, terrain });
     }
   }
 
   // why: the accent halo fills the border zone around a tile (the gaps the
   // tile leaves inside its cell plus the big-radius corner cuts) so the
   // island edge reads as sheet meeting tile directly, not dark background
-  // why: a band end reaching a concave vertex must stop short of the
-  // corner; the pocket covers the gap, so the trim only needs to clear
-  // the band's own overdraw
-  private bandEndTrim(across: boolean, diagonal: boolean): number {
-    return !across && !diagonal ? BAND_TRIM_PX : 0;
-  }
-
   private paintIslandHalo(
     sx: number,
     sy: number,
@@ -441,49 +457,17 @@ export class Renderer {
     const cellSize = size + CELL_GAP;
     const radius = islandRadius(size);
     this.ctx.fillStyle = canvasPalette().hidden;
-    // why: at a concave vertex (three revealed cells around one hidden)
-    // a band's last pixels stack over the flanking tile's corner notch
-    // and read as a stray accent corner — trimming the band end lets
-    // the grout pocket own the vertex zone instead
     if (terrain.top) {
-      const left = this.bandEndTrim(terrain.left, terrain.topLeft);
-      const right = this.bandEndTrim(terrain.right, terrain.topRight);
-      this.ctx.fillRect(
-        sx - 0.5 + left,
-        sy - 1,
-        cellSize + 1 - left - right,
-        1.5,
-      );
+      this.ctx.fillRect(sx - 0.5, sy - 1, cellSize + 1, 1.5);
     }
     if (terrain.left) {
-      const top = this.bandEndTrim(terrain.top, terrain.topLeft);
-      const bottom = this.bandEndTrim(terrain.bottom, terrain.bottomLeft);
-      this.ctx.fillRect(
-        sx - 1,
-        sy - 0.5 + top,
-        1.5,
-        cellSize + 1 - top - bottom,
-      );
+      this.ctx.fillRect(sx - 1, sy - 0.5, 1.5, cellSize + 1);
     }
     if (terrain.right) {
-      const top = this.bandEndTrim(terrain.top, terrain.topRight);
-      const bottom = this.bandEndTrim(terrain.bottom, terrain.bottomRight);
-      this.ctx.fillRect(
-        sx + size - 0.5,
-        sy - 0.5 + top,
-        2,
-        cellSize + 1 - top - bottom,
-      );
+      this.ctx.fillRect(sx + size - 0.5, sy - 0.5, 2, cellSize + 1);
     }
     if (terrain.bottom) {
-      const left = this.bandEndTrim(terrain.left, terrain.bottomLeft);
-      const right = this.bandEndTrim(terrain.right, terrain.bottomRight);
-      this.ctx.fillRect(
-        sx - 0.5 + left,
-        sy + size - 0.5,
-        cellSize + 1 - left - right,
-        2,
-      );
+      this.ctx.fillRect(sx - 0.5, sy + size - 0.5, cellSize + 1, 2);
     }
     if (terrain.left && terrain.top) {
       this.ctx.fillRect(sx - 1, sy - 1, radius + 2, radius + 2);
@@ -511,7 +495,7 @@ export class Renderer {
   // bite radius, so the accent bands and sheet flow together around it
   // — no explicit seam needed since band, sheet, and gap between them
   // share colors with their neighbors. Pockets paint after all halo
-  // bands and center on the CELL vertex (tiles inset on right/bottom).
+  // bands and sheet overdraw, so they own the vertex zone.
   private flushConcaveCorners(): void {
     if (this.concavePaints.length === 0) return;
     this.ctx.fillStyle = canvasPalette().background;
@@ -589,9 +573,10 @@ export class Renderer {
   // algorithm: legs run from the two tangent points through the vertex,
   // then the arc (centered radius-deep inside the hidden cell) closes
   // the path — the fill rounds the sheet's corner with a concave curve.
-  // Legs sit exactly on the adjacent TILE edges (tiles are inset on
-  // their right/bottom) so the grout never paints over a tile, while
-  // the cell's gap columns merge into the pocket as interior grout.
+  // Legs sit exactly on the halo band border lines (0.5px inside the
+  // flanking tiles) so the bite's edge continues each band line exactly
+  // and the arc joins them tangentially — one smooth border with no
+  // wedge of a different color at the vertex.
   private paintConcaveBite(
     vx: number,
     vy: number,
@@ -600,10 +585,8 @@ export class Renderer {
     radius: number,
   ): void {
     if (radius < 0.5) return;
-    // why: legs sit on the adjacent TILE edges, which draw a quarter
-    // pixel off the cell grid, so the legs inherit the same offset
-    const legX = vx + TILE_OFFSET_PX - (hx === 1 ? CELL_GAP : 0);
-    const legY = vy + TILE_OFFSET_PX - (hy === 1 ? CELL_GAP : 0);
+    const legX = vx - (hx === 1 ? CELL_GAP : 0) - hx * 0.5;
+    const legY = vy - (hy === 1 ? CELL_GAP : 0) - hy * 0.5;
     const angleAtVertical = hx === 1 ? Math.PI : 0;
     const angleAtHorizontal = hy === 1 ? Math.PI * 1.5 : Math.PI * 0.5;
     this.ctx.beginPath();
@@ -851,6 +834,11 @@ function hasConcaveCorner(terrain: TileTerrain): boolean {
   );
 }
 
+function snapToLattice(css: number, canvas: HTMLCanvasElement): number {
+  const dpr = canvas.width / canvas.clientWidth;
+  return (Math.floor(css * dpr) + 0.5) / dpr;
+}
+
 function islandRadius(size: number): number {
   return Math.min(size * ISLAND_CORNER_RADIUS_RATIO, size / 2);
 }
@@ -858,20 +846,16 @@ function islandRadius(size: number): number {
 // why: a tile corner is an island corner when both orthogonal neighbors
 // are hidden sheet — straight border runs and interior corners keep the
 // small per-tile radius, so the discovered region stays "tiled" inside
-// why: a tile corner facing a concave vertex (exactly one hidden cell
-// among the corner's three neighbors) renders sharp — the notch a
-// rounded corner leaves would show the hidden cell's sheet overdraw as
-// accent slivers wedged at the junction
+// why: island corners (both orthogonal neighbors hidden) round far more
+// than interior corners; concave-facing corners render with the normal
+// interior radius like every other tile corner — the grout pocket
+// painted last covers their notch zone at concave vertices
 function cornerRadius(
   orthHiddenA: boolean,
   orthHiddenB: boolean,
-  diagonalHidden: boolean,
   size: number,
 ): number {
-  if (orthHiddenA && orthHiddenB) return islandRadius(size);
-  const hiddenNeighbors =
-    (orthHiddenA ? 1 : 0) + (orthHiddenB ? 1 : 0) + (diagonalHidden ? 1 : 0);
-  return hiddenNeighbors === 1 ? 0 : tileRadius(size);
+  return orthHiddenA && orthHiddenB ? islandRadius(size) : tileRadius(size);
 }
 
 function tileRadii(
@@ -879,10 +863,10 @@ function tileRadii(
   size: number,
 ): [number, number, number, number] {
   return [
-    cornerRadius(terrain.left, terrain.top, terrain.topLeft, size),
-    cornerRadius(terrain.right, terrain.top, terrain.topRight, size),
-    cornerRadius(terrain.right, terrain.bottom, terrain.bottomRight, size),
-    cornerRadius(terrain.left, terrain.bottom, terrain.bottomLeft, size),
+    cornerRadius(terrain.left, terrain.top, size),
+    cornerRadius(terrain.right, terrain.top, size),
+    cornerRadius(terrain.right, terrain.bottom, size),
+    cornerRadius(terrain.left, terrain.bottom, size),
   ];
 }
 

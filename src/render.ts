@@ -427,6 +427,7 @@ export class Renderer {
     const radii = tileRadii(terrain, size);
     this.paintIslandHalo(tsx, tsy, size, terrain);
     this.drawTile(tsx, tsy, size, canvasPalette().revealed, radii);
+    this.paintNotchCorners(tsx, tsy, size, terrain);
     this.ctx.globalAlpha = progress;
     this.drawNumber(x, y, tsx, tsy, size);
     this.ctx.globalAlpha = 1 - progress;
@@ -457,17 +458,21 @@ export class Renderer {
     const cellSize = size + CELL_GAP;
     const radius = islandRadius(size);
     this.ctx.fillStyle = canvasPalette().hidden;
+    // why: bands run flush along the tile body edge and stop at the cell
+    // edges — an into-body overlap only ever showed as accent tabs in the
+    // mortar where a band end crossed a tile gap, and along-axis overshoot
+    // spilled into neighboring cells' mortar
     if (terrain.top) {
-      this.ctx.fillRect(sx - 0.5, sy - 1, cellSize + 1, 1.5);
+      this.ctx.fillRect(sx, sy - 1, cellSize, 1);
     }
     if (terrain.left) {
-      this.ctx.fillRect(sx - 1, sy - 0.5, 1.5, cellSize + 1);
+      this.ctx.fillRect(sx - 1, sy, 1, cellSize);
     }
     if (terrain.right) {
-      this.ctx.fillRect(sx + size - 0.5, sy - 0.5, 2, cellSize + 1);
+      this.ctx.fillRect(sx + size, sy, 1.5, cellSize);
     }
     if (terrain.bottom) {
-      this.ctx.fillRect(sx - 0.5, sy + size - 0.5, cellSize + 1, 2);
+      this.ctx.fillRect(sx, sy + size, cellSize, 1.5);
     }
     if (terrain.left && terrain.top) {
       this.ctx.fillRect(sx - 1, sy - 1, radius + 2, radius + 2);
@@ -491,11 +496,9 @@ export class Renderer {
   // why: at a vertex with three revealed cells and one hidden cell the
   // sheet cell's corner pokes sharply into the island — a grout pocket
   // (background color) fills the corner, rounding the sheet's edge with
-  // a concave arc. The pocket is inset by the halo width from the full
-  // bite radius, so the accent bands and sheet flow together around it
-  // — no explicit seam needed since band, sheet, and gap between them
-  // share colors with their neighbors. Pockets paint after all halo
-  // bands and sheet overdraw, so they own the vertex zone.
+  // a concave arc that continues the two border lines meeting there.
+  // Pockets paint after all halo bands, sheet overdraw, and notch
+  // repaints, so they own the vertex zone.
   private flushConcaveCorners(): void {
     if (this.concavePaints.length === 0) return;
     this.ctx.fillStyle = canvasPalette().background;
@@ -519,7 +522,7 @@ export class Renderer {
       }
       if (terrain.topRight && !terrain.top && !terrain.right) {
         this.paintConcaveBite(
-          right,
+          right - CELL_GAP,
           sy,
           1,
           -1,
@@ -532,8 +535,8 @@ export class Renderer {
       }
       if (terrain.bottomRight && !terrain.right && !terrain.bottom) {
         this.paintConcaveBite(
-          right,
-          bottom,
+          right - CELL_GAP,
+          bottom - CELL_GAP,
           1,
           1,
           this.grownBiteRadius(radius, [
@@ -546,7 +549,7 @@ export class Renderer {
       if (terrain.bottomLeft && !terrain.left && !terrain.bottom) {
         this.paintConcaveBite(
           sx,
-          bottom,
+          bottom - CELL_GAP,
           -1,
           1,
           this.grownBiteRadius(radius, [
@@ -570,23 +573,20 @@ export class Renderer {
     return radius * this.biteProgress(cells);
   }
 
-  // algorithm: legs run from the two tangent points through the vertex,
-  // then the arc (centered radius-deep inside the hidden cell) closes
-  // the path — the fill rounds the sheet's corner with a concave curve.
-  // Legs sit exactly on the halo band border lines (0.5px inside the
-  // flanking tiles) so the bite's edge continues each band line exactly
-  // and the arc joins them tangentially — one smooth border with no
-  // wedge of a different color at the vertex.
+  // algorithm: legs run from the two tangent points through the corner,
+  // then the arc (centered radius-deep inside the cut-out region) closes
+  // the path — the fill rounds the corner with a concave curve. Legs sit
+  // exactly on the tile body edges, the lines the visible border runs
+  // along, so the cut edge continues each border line at the same
+  // coordinate and the arc joins them tangentially — one smooth border.
   private paintConcaveBite(
-    vx: number,
-    vy: number,
+    legX: number,
+    legY: number,
     hx: number,
     hy: number,
     radius: number,
   ): void {
     if (radius < 0.5) return;
-    const legX = vx - (hx === 1 ? CELL_GAP : 0) - hx * 0.5;
-    const legY = vy - (hy === 1 ? CELL_GAP : 0) - hy * 0.5;
     const angleAtVertical = hx === 1 ? Math.PI : 0;
     const angleAtHorizontal = hy === 1 ? Math.PI * 1.5 : Math.PI * 0.5;
     this.ctx.beginPath();
@@ -649,6 +649,54 @@ export class Renderer {
     this.ctx.beginPath();
     this.ctx.roundRect(sx, sy, size, size, radii ?? tileRadius(size));
     this.ctx.fill();
+  }
+
+  // why: a tile corner flanked by exactly one hidden side keeps the halo
+  // band's overlap strip visible inside its rounded notch, and a corner
+  // facing a hidden diagonal keeps the sheet's overdraw speck — repaint
+  // those notches so they read as plain mortar like interior corners;
+  // corners with both orthogonal sides hidden are island corners filled
+  // with accent by design
+  private paintNotchCorners(
+    sx: number,
+    sy: number,
+    size: number,
+    terrain: TileTerrain,
+  ): void {
+    const radius = tileRadius(size);
+    this.ctx.fillStyle = canvasPalette().background;
+    const notch = (
+      x: number,
+      y: number,
+      hx: number,
+      hy: number,
+      hiddenA: boolean,
+      hiddenB: boolean,
+      hiddenDiag: boolean,
+    ): void => {
+      if (hiddenA === hiddenB && !(hiddenDiag && !hiddenA)) return;
+      this.paintConcaveBite(x, y, hx, hy, radius);
+    };
+    notch(sx, sy, 1, 1, terrain.left, terrain.top, terrain.topLeft);
+    notch(sx + size, sy, -1, 1, terrain.top, terrain.right, terrain.topRight);
+    notch(
+      sx + size,
+      sy + size,
+      -1,
+      -1,
+      terrain.right,
+      terrain.bottom,
+      terrain.bottomRight,
+    );
+    notch(
+      sx,
+      sy + size,
+      1,
+      -1,
+      terrain.bottom,
+      terrain.left,
+      terrain.bottomLeft,
+    );
   }
 
   private drawNumber(

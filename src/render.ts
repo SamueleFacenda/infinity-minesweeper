@@ -103,6 +103,12 @@ export class Renderer {
   private readonly concavePaints: ConcavePaint[] = [];
   private readonly snapXs = new Map<number, number>();
   private readonly snapYs = new Map<number, number>();
+  private lattice = {
+    dpr: 1,
+    pitch: 1,
+    originX: 0,
+    originY: 0,
+  };
   private lossAnim: LossAnimation | null = null;
   private animFrame: number | null = null;
   private drawPending = false;
@@ -144,6 +150,7 @@ export class Renderer {
     // render isolated razor-sharp accent lines
     this.snapXs.clear();
     this.snapYs.clear();
+    this.buildLattice(width, height);
     const originX = Math.floor(this.cameraX - width / (2 * this.cellSize));
     const originY = Math.floor(this.cameraY - height / (2 * this.cellSize));
     const spanX = Math.ceil(width / this.cellSize) + 2;
@@ -372,15 +379,28 @@ export class Renderer {
     this.drawRevealed(x, y, sx, sy, size, progress);
   }
 
-  // why: cell lines snap to half-device-pixel coordinates; per-cell sizes
-  // vary by at most one device pixel, which no rendered element reveals
+  // why: all cell edges derive from one lattice basis — an integer device
+  // pitch plus a snapped origin — so every cell is exactly as wide as its
+  // neighbors and the whole grid moves by whole device pixels while
+  // panning; rounding each edge separately let adjacent cells differ by a
+  // pixel, which drifted borders apart into misaligned, unevenly
+  // antialiased cells at zoom levels where cellSize * dpr is fractional
+  private buildLattice(width: number, height: number): void {
+    const dpr = this.canvas.width / this.canvas.clientWidth;
+    this.lattice = {
+      dpr,
+      pitch: Math.max(1, Math.round(this.cellSize * dpr)),
+      originX: Math.round((width / 2 - this.cameraX * this.cellSize) * dpr),
+      originY: Math.round((height / 2 - this.cameraY * this.cellSize) * dpr),
+    };
+  }
+
   private snapX(cellIndex: number): number {
     let snapped = this.snapXs.get(cellIndex);
     if (snapped === undefined) {
-      const raw =
-        (cellIndex - this.cameraX) * this.cellSize +
-        this.canvas.clientWidth / 2;
-      snapped = snapToLattice(raw, this.canvas);
+      snapped =
+        (this.lattice.originX + 0.5 + cellIndex * this.lattice.pitch) /
+        this.lattice.dpr;
       this.snapXs.set(cellIndex, snapped);
     }
     return snapped;
@@ -389,10 +409,9 @@ export class Renderer {
   private snapY(cellIndex: number): number {
     let snapped = this.snapYs.get(cellIndex);
     if (snapped === undefined) {
-      const raw =
-        (cellIndex - this.cameraY) * this.cellSize +
-        this.canvas.clientHeight / 2;
-      snapped = snapToLattice(raw, this.canvas);
+      snapped =
+        (this.lattice.originY + 0.5 + cellIndex * this.lattice.pitch) /
+        this.lattice.dpr;
       this.snapYs.set(cellIndex, snapped);
     }
     return snapped;
@@ -887,11 +906,6 @@ function hasConcaveCorner(terrain: TileTerrain): boolean {
     (terrain.bottomRight && !terrain.right && !terrain.bottom) ||
     (terrain.bottomLeft && !terrain.left && !terrain.bottom)
   );
-}
-
-function snapToLattice(css: number, canvas: HTMLCanvasElement): number {
-  const dpr = canvas.width / canvas.clientWidth;
-  return (Math.floor(css * dpr) + 0.5) / dpr;
 }
 
 function islandRadius(size: number): number {

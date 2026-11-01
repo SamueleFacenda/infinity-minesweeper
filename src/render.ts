@@ -296,6 +296,14 @@ export class Renderer {
     );
   }
 
+  // why: the overlap keeps shared sheet seams fully covered; overdraw
+  // toward a revealed tile serves nothing there — its body repaints the
+  // straight stretches — and only shows as an accent sliver inside its
+  // rounded corner notches
+  private sheetEdgeOverdraw(x: number, y: number): number {
+    return this.board.isRevealed(x, y) ? 0 : SHEET_OVERDRAW_PX;
+  }
+
   private drawSheetCell(x: number, y: number): void {
     const sx = this.snapX(x);
     const sy = this.snapY(y);
@@ -303,17 +311,16 @@ export class Renderer {
     const cellH = this.snapY(y + 1) - sy;
     const board = this.board;
     const key = keyOf(x, y);
+    const left = this.sheetEdgeOverdraw(x - 1, y);
+    const top = this.sheetEdgeOverdraw(x, y - 1);
+    const right = this.sheetEdgeOverdraw(x + 1, y);
+    const bottom = this.sheetEdgeOverdraw(x, y + 1);
     this.ctx.fillStyle = canvasPalette().hidden;
-    // why: unconditional overlap gives every shared sheet edge full pixel
-    // coverage — partial overdraw leaves a few percent of background
-    // bleed on lattice-snapped edges, reading as a faint per-cell grid.
-    // Overdraw into revealed cells lands under their halo bands; the
-    // grout pocket painted last owns the concave vertex zones.
     this.ctx.fillRect(
-      sx - SHEET_OVERDRAW_PX,
-      sy - SHEET_OVERDRAW_PX,
-      cellW + SHEET_OVERDRAW_PX * 2,
-      cellH + SHEET_OVERDRAW_PX * 2,
+      sx - left,
+      sy - top,
+      cellW + left + right,
+      cellH + top + bottom,
     );
     const hovered =
       this.hoverCell !== null &&

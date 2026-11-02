@@ -124,6 +124,9 @@ export class Renderer {
   private mineSprite: MineSprite | null = null;
   readonly reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
     .matches;
+  // why: the per-tile white flash on reveal reads as a full-screen strobe
+  // on touch devices; the tile fade-in stays, only the flash is gated
+  readonly coarsePointer = window.matchMedia("(pointer: coarse)").matches;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -521,7 +524,7 @@ export class Renderer {
     this.drawNumber(x, y, tsx, tsy, size);
     this.ctx.globalAlpha = 1 - progress;
     this.drawSheetRect(tsx, tsy, size + CELL_GAP);
-    const flash = progress * (1 - progress) * 4 * 0.22;
+    const flash = this.coarsePointer ? 0 : progress * (1 - progress) * 4 * 0.22;
     if (flash > 0.01) {
       this.ctx.globalAlpha = flash;
       this.ctx.fillStyle = "#ffffff";

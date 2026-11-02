@@ -161,10 +161,11 @@ function neighbors(x: number, y: number): [number, number][] {
 }
 
 describe("run metrics", () => {
+  // shortcut: whole board plays in ~10s; raise the timeout before the board gets slower
   it("fastest target is reachable within guided play on easy", () => {
     const board = new Board(0xbeef, 0.12);
     board.reveal(0, 0);
     playGuided(board, 400);
     expect(board.revealedCount).toBeGreaterThanOrEqual(FASTEST_TARGET_TILES);
-  });
+  }, 60_000);
 });

@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Loss screen taunts: random insult message from a 40-entry list
 - Board inspection after loss: "Inspect board" button hides the overlay so the final board can be panned and zoomed; wrong flags are crossed out in red
 - SVG favicon: spiky mine on the dark game background
+- Touch input: one-finger drag pans, two-finger pinch zooms, short tap takes the primary action, and the platform contextmenu event doubles as the long-press secondary action; the synthetic mouse sequence is suppressed (canceled touchend) plus a 250ms mouse-event guard after touches
+- Click mode switch: "Flag first" HUD toggle swaps short-click/right-click (and tap/long-press) between flag and open; numbers always chord on short click; default is flag-first on touch devices and open-first on desktop, persisted per browser
+- Mobile rendering: per-tile white reveal flash skipped on coarse pointers (kept on desktop) and the platform tap-highlight overlay disabled on the canvas
+- Sound design: crunchy WebAudio-synthesized feedback with no audio files — thock on flag placement and a lighter pick-up on removal, a reveal crunch that gets deeper and longer as the discovered area grows (with a low rumble on big floods), and a 1.2s low sweeping explosion on loss; the audio context is created lazily inside the triggering input handlers (autoplay-policy safe) and all sounds no-op silently when WebAudio is unavailable
 
 ### Changed
 

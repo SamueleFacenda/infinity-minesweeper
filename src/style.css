@@ -121,6 +121,11 @@ select:focus-visible {
   outline-offset: 2px;
 }
 
+#btn-clickmode[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .accent-dots {
   display: flex;
   align-items: center;
@@ -167,6 +172,7 @@ main {
   height: 100%;
   cursor: pointer;
   touch-action: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .hidden {

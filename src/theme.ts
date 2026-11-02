@@ -112,6 +112,8 @@ export const THEMES: Readonly<Record<ThemeName, ThemeDefinition>> = {
 export interface ThemeSettings {
   readonly theme: ThemeName;
   readonly accent: string;
+  // absent = follow the device default (touch devices flag first)
+  readonly flagFirst?: boolean;
 }
 
 const STORAGE_KEY = "infinite-minesweeper.theme.v1";
@@ -141,7 +143,9 @@ export function loadThemeSettings(storage: Storage): ThemeSettings {
   const accent = isAccentHex(raw.accent)
     ? raw.accent
     : THEMES[theme].defaultAccent;
-  return { theme, accent };
+  const flagFirst =
+    typeof raw.flagFirst === "boolean" ? raw.flagFirst : undefined;
+  return { theme, accent, flagFirst };
 }
 
 let activeCanvasPalette: CanvasPalette = {
@@ -161,6 +165,7 @@ export function accentColor(): string {
 export function applyTheme(
   theme: ThemeName,
   accent: string,
+  flagFirst: boolean,
   documentRef: Document,
   storage: Storage,
 ): void {
@@ -177,7 +182,7 @@ export function applyTheme(
   try {
     storage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ theme, accent: resolvedAccent }),
+      JSON.stringify({ theme, accent: resolvedAccent, flagFirst }),
     );
   } catch {
     // why: sandboxed storage can throw; appearance is a cosmetic preference

@@ -599,6 +599,7 @@ export class Renderer {
       const right = sx + size + CELL_GAP;
       const bottom = sy + size + CELL_GAP;
       const radius = islandRadius(size);
+      const feather = 1 / this.lattice.dpr;
       if (terrain.topLeft && !terrain.top && !terrain.left) {
         this.paintConcaveBite(
           sx,
@@ -610,6 +611,7 @@ export class Renderer {
             [x - 1, y],
             [x, y - 1],
           ]),
+          feather,
         );
       }
       if (terrain.topRight && !terrain.top && !terrain.right) {
@@ -623,6 +625,7 @@ export class Renderer {
             [x + 1, y],
             [x, y - 1],
           ]),
+          feather,
         );
       }
       if (terrain.bottomRight && !terrain.right && !terrain.bottom) {
@@ -636,6 +639,7 @@ export class Renderer {
             [x + 1, y],
             [x, y + 1],
           ]),
+          feather,
         );
       }
       if (terrain.bottomLeft && !terrain.left && !terrain.bottom) {
@@ -649,6 +653,7 @@ export class Renderer {
             [x - 1, y],
             [x, y + 1],
           ]),
+          feather,
         );
       }
     }
@@ -677,23 +682,37 @@ export class Renderer {
     hx: number,
     hy: number,
     radius: number,
+    feather = 0,
   ): void {
     if (radius < 0.5) return;
     const angleAtVertical = hx === 1 ? Math.PI : 0;
     const angleAtHorizontal = hy === 1 ? Math.PI * 1.5 : Math.PI * 0.5;
-    this.ctx.beginPath();
-    this.ctx.moveTo(legX + hx * radius, legY);
-    this.ctx.lineTo(legX, legY);
-    this.ctx.lineTo(legX, legY + hy * radius);
-    this.ctx.arc(
-      legX + hx * radius,
-      legY + hy * radius,
-      radius,
-      angleAtVertical,
-      angleAtHorizontal,
-      hx !== hy,
-    );
-    this.ctx.closePath();
+    const trace = (lx: number, ly: number, r: number): void => {
+      this.ctx.beginPath();
+      this.ctx.moveTo(lx + hx * r, ly);
+      this.ctx.lineTo(lx, ly);
+      this.ctx.lineTo(lx, ly + hy * r);
+      this.ctx.arc(
+        lx + hx * r,
+        ly + hy * r,
+        r,
+        angleAtVertical,
+        angleAtHorizontal,
+        hx !== hy,
+      );
+      this.ctx.closePath();
+    };
+    // why: a half-transparent overshoot spreads the pocket's edge across
+    // two device pixels so the rounded arc and its legs read as a soft
+    // gradient — a plain edge always cuts pixels in half, leaving a
+    // one-pixel line equally sharp at every zoom
+    if (feather > 0) {
+      this.ctx.globalAlpha = 0.5;
+      trace(legX - hx * feather, legY - hy * feather, radius + feather);
+      this.ctx.fill();
+      this.ctx.globalAlpha = 1;
+    }
+    trace(legX, legY, radius);
     this.ctx.fill();
   }
 

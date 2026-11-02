@@ -9,7 +9,7 @@ import { canvasPalette } from "./theme.js";
 // fluid accent-colored sheet (overdrawn edgeless rects); revealed cells are
 // individual rounded tiles carved into it. Cell state changes animate
 // through per-cell records replayed by a requestAnimationFrame loop that
-// only runs while animations are pending.
+// runs while animations are pending or the view is still moving.
 
 const MIN_CELL_SIZE = 14;
 const MAX_CELL_SIZE = 56;
@@ -47,6 +47,13 @@ interface RevealAnimation {
   readonly startTime: number;
   readonly delay: number;
 }
+
+// why: eases the rendered lattice toward its quantized target so zoom and
+// pan glide instead of jumping between integer device-pixel snaps
+const easeToward = (current: number, target: number): number =>
+  Math.abs(target - current) < 0.05
+    ? target
+    : current + (target - current) * 0.35;
 
 interface FlagAnimation {
   readonly placing: boolean;
@@ -109,6 +116,8 @@ export class Renderer {
     originX: 0,
     originY: 0,
   };
+  private latticeTarget = { pitch: 1, originX: 0, originY: 0 };
+  private latticeStarted = false;
   private lossAnim: LossAnimation | null = null;
   private animFrame: number | null = null;
   private drawPending = false;
@@ -144,17 +153,34 @@ export class Renderer {
     const palette = canvasPalette();
     this.ctx.fillStyle = palette.background;
     this.ctx.fillRect(0, 0, width, height);
-    // why: cell lines snap to a half-device-pixel lattice so every tile
-    // and band edge is antialiased at every zoom and pixel ratio —
-    // camera phases that align edges with device pixels otherwise
-    // render isolated razor-sharp accent lines
+    // why: cell lines snap to a quarter-device-pixel lattice so every
+    // tile and band edge straddles two device pixels and antialiases
+    // softly at every zoom and pixel ratio
     this.snapXs.clear();
     this.snapYs.clear();
     this.buildLattice(width, height);
-    const originX = Math.floor(this.cameraX - width / (2 * this.cellSize));
-    const originY = Math.floor(this.cameraY - height / (2 * this.cellSize));
-    const spanX = Math.ceil(width / this.cellSize) + 2;
-    const spanY = Math.ceil(height / this.cellSize) + 2;
+    // why: the painted range derives from the rendered lattice rather than
+    // the exact camera math — while the lattice eases toward its target the
+    // exact range stops short of the viewport edge and leaves an uncovered
+    // strip that flickers as the ease converges
+    const deviceWidth = width * this.lattice.dpr;
+    const deviceHeight = height * this.lattice.dpr;
+    const firstCol =
+      Math.ceil((-this.lattice.originX - 0.25) / this.lattice.pitch - 1) - 1;
+    const lastCol =
+      Math.floor(
+        (deviceWidth - this.lattice.originX - 0.25) / this.lattice.pitch,
+      ) + 1;
+    const firstRow =
+      Math.ceil((-this.lattice.originY - 0.25) / this.lattice.pitch - 1) - 1;
+    const lastRow =
+      Math.floor(
+        (deviceHeight - this.lattice.originY - 0.25) / this.lattice.pitch,
+      ) + 1;
+    const originX = firstCol;
+    const originY = firstRow;
+    const spanX = lastCol - firstCol + 1;
+    const spanY = lastRow - firstRow + 1;
     // why: sheet first so its overdraw never bleeds over rounded tiles
     for (let cy = originY; cy < originY + spanY; cy++) {
       for (let cx = originX; cx < originX + spanX; cx++) {
@@ -272,8 +298,16 @@ export class Renderer {
     const animationsActive = this.pruneAnimations(now);
     // why: the frame that prunes the last animation must still draw —
     // otherwise the canvas keeps the previous mid-animation frame frozen
-    // on screen (pockets stuck short of their full radius)
-    if (!animationsActive && !this.drawPending && !hadAnimations) return;
+    // on screen (pockets stuck short of their full radius); the easing
+    // lattice likewise needs frames until it settles onto its target
+    if (
+      !animationsActive &&
+      !this.drawPending &&
+      !hadAnimations &&
+      this.latticeSettled()
+    ) {
+      return;
+    }
     this.drawPending = false;
     this.draw();
     this.scheduleAnimationFrame();
@@ -384,22 +418,51 @@ export class Renderer {
   // neighbors and the whole grid moves by whole device pixels while
   // panning; rounding each edge separately let adjacent cells differ by a
   // pixel, which drifted borders apart into misaligned, unevenly
-  // antialiased cells at zoom levels where cellSize * dpr is fractional
+  // antialiased cells at zoom levels where cellSize * dpr is fractional.
+  // The rendered values ease toward that target instead of snapping each
+  // frame: a single wheel tick then glides the grid instead of rescaling
+  // and re-rounding it at once, which reads as shaking
   private buildLattice(width: number, height: number): void {
     const dpr = this.canvas.width / this.canvas.clientWidth;
+    const pitch = Math.max(1, Math.round(this.cellSize * dpr));
+    const originX = Math.round(
+      (width / 2 - this.cameraX * this.cellSize) * dpr,
+    );
+    const originY = Math.round(
+      (height / 2 - this.cameraY * this.cellSize) * dpr,
+    );
+    if (!this.latticeStarted || this.lattice.dpr !== dpr) {
+      this.lattice = { dpr, pitch, originX, originY };
+      this.latticeTarget = { pitch, originX, originY };
+      this.latticeStarted = true;
+      return;
+    }
+    this.latticeTarget = { pitch, originX, originY };
     this.lattice = {
       dpr,
-      pitch: Math.max(1, Math.round(this.cellSize * dpr)),
-      originX: Math.round((width / 2 - this.cameraX * this.cellSize) * dpr),
-      originY: Math.round((height / 2 - this.cameraY * this.cellSize) * dpr),
+      pitch: easeToward(this.lattice.pitch, pitch),
+      originX: easeToward(this.lattice.originX, originX),
+      originY: easeToward(this.lattice.originY, originY),
     };
   }
 
+  private latticeSettled(): boolean {
+    return (
+      this.lattice.pitch === this.latticeTarget.pitch &&
+      this.lattice.originX === this.latticeTarget.originX &&
+      this.lattice.originY === this.latticeTarget.originY
+    );
+  }
+
+  // why: a quarter-device-pixel offset makes every edge straddle two device
+  // pixels, so borders antialias across a soft two-pixel gradient instead
+  // of one crisp mid-tone line; the fixed offset keeps that gradient
+  // identical at every zoom level and camera phase
   private snapX(cellIndex: number): number {
     let snapped = this.snapXs.get(cellIndex);
     if (snapped === undefined) {
       snapped =
-        (this.lattice.originX + 0.5 + cellIndex * this.lattice.pitch) /
+        (this.lattice.originX + 0.25 + cellIndex * this.lattice.pitch) /
         this.lattice.dpr;
       this.snapXs.set(cellIndex, snapped);
     }
@@ -410,7 +473,7 @@ export class Renderer {
     let snapped = this.snapYs.get(cellIndex);
     if (snapped === undefined) {
       snapped =
-        (this.lattice.originY + 0.5 + cellIndex * this.lattice.pitch) /
+        (this.lattice.originY + 0.25 + cellIndex * this.lattice.pitch) /
         this.lattice.dpr;
       this.snapYs.set(cellIndex, snapped);
     }

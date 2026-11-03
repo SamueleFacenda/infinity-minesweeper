@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Stale animation replay: a no-op click no longer re-animates the previous reveal or auto-flag batch (cell change batches are cleared at the start of every click path)
+- External corner removal now animates: when a neighboring cell is discovered, a previously revealed tile's island corner (40% radius plus accent crescent) collapses to the tile radius (10%) over the neighbor's reveal instead of snapping in one frame; corners of cells uncovered in the same batch settle with the flood, and internal concave pockets already animated
 
 ### Deprecated
 

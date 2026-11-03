@@ -48,6 +48,68 @@ interface RevealAnimation {
   readonly delay: number;
 }
 
+// why: corner index order matches the radii array roundRect consumes —
+// topLeft, topRight, bottomRight, bottomLeft
+const CORNER_TOP_LEFT = 0;
+const CORNER_TOP_RIGHT = 1;
+const CORNER_BOTTOM_RIGHT = 2;
+const CORNER_BOTTOM_LEFT = 3;
+
+interface CornerCollapseQueries {
+  readonly isRevealed: (x: number, y: number) => boolean;
+  // why: only a tile revealed before this batch owns a corner that can lose
+  // its rounding — corners of cells uncovered together belong to the flood
+  // itself and settle with it instead of animating apart
+  readonly settledBeforeBatch: (x: number, y: number) => boolean;
+}
+
+interface CornerCollapseSide {
+  readonly corner: number;
+  readonly other: readonly [number, number];
+}
+
+interface CornerCollapseSides {
+  readonly offset: readonly [number, number];
+  readonly corners: readonly CornerCollapseSide[];
+}
+
+// why: discovering a cell collapses the island corners of the revealed
+// orthogonal neighbors it borders; each entry pairs the offset from the
+// discovered cell to the neighbor with the neighbor corners facing it and
+// each corner's other side — a corner collapses only while that other side
+// still faces hidden sheet, otherwise the corner already renders at the
+// tile radius
+const CORNER_COLLAPSE_SIDES: readonly CornerCollapseSides[] = [
+  {
+    offset: [-1, 0],
+    corners: [
+      { corner: CORNER_TOP_RIGHT, other: [0, -1] },
+      { corner: CORNER_BOTTOM_RIGHT, other: [0, 1] },
+    ],
+  },
+  {
+    offset: [1, 0],
+    corners: [
+      { corner: CORNER_TOP_LEFT, other: [0, -1] },
+      { corner: CORNER_BOTTOM_LEFT, other: [0, 1] },
+    ],
+  },
+  {
+    offset: [0, -1],
+    corners: [
+      { corner: CORNER_BOTTOM_LEFT, other: [-1, 0] },
+      { corner: CORNER_BOTTOM_RIGHT, other: [1, 0] },
+    ],
+  },
+  {
+    offset: [0, 1],
+    corners: [
+      { corner: CORNER_TOP_LEFT, other: [-1, 0] },
+      { corner: CORNER_TOP_RIGHT, other: [1, 0] },
+    ],
+  },
+];
+
 // why: eases the rendered lattice toward its quantized target so zoom and
 // pan glide instead of jumping between integer device-pixel snaps
 const easeToward = (current: number, target: number): number =>
@@ -106,6 +168,9 @@ export class Renderer {
   hoverCell: Cell | null = null;
 
   private readonly revealAnims = new Map<string, RevealAnimation>();
+  // why: keyed by cell and corner, each entry holds the reveal animation
+  // driving that corner's collapse from the island to the tile radius
+  private readonly cornerCollapses = new Map<string, RevealAnimation>();
   private readonly flagAnims = new Map<string, FlagAnimation>();
   private readonly concavePaints: ConcavePaint[] = [];
   private readonly snapXs = new Map<number, number>();
@@ -139,6 +204,7 @@ export class Renderer {
     this.hintCell = null;
     this.hoverCell = null;
     this.revealAnims.clear();
+    this.cornerCollapses.clear();
     this.flagAnims.clear();
     this.lossAnim = null;
   }
@@ -211,7 +277,21 @@ export class Renderer {
         delay: distance * REVEAL_STAGGER_MS,
       });
     }
+    this.registerCornerCollapses(cells);
     this.scheduleAnimationFrame();
+  }
+
+  private registerCornerCollapses(
+    cells: readonly (readonly [number, number])[],
+  ): void {
+    const registrations = cornerCollapseRegistrations(
+      cells,
+      this.revealAnims,
+      (x, y) => this.board.isRevealed(x, y),
+    );
+    for (const [key, driver] of registrations) {
+      this.cornerCollapses.set(key, driver);
+    }
   }
 
   animateFlagRaise(cells: readonly (readonly [number, number])[]) {
@@ -320,6 +400,11 @@ export class Renderer {
     for (const [key, anim] of this.revealAnims) {
       if (now - anim.startTime - anim.delay >= REVEAL_DURATION_MS) {
         this.revealAnims.delete(key);
+      }
+    }
+    for (const [key, anim] of this.cornerCollapses) {
+      if (now - anim.startTime - anim.delay >= REVEAL_DURATION_MS) {
+        this.cornerCollapses.delete(key);
       }
     }
     for (const [key, anim] of this.flagAnims) {
@@ -503,6 +588,65 @@ export class Renderer {
     return progress;
   }
 
+  // why: an island corner collapses toward the tile radius while the
+  // neighboring reveal plays out, so the external corner retreats with the
+  // tile that un-hid its side instead of snapping in a single frame
+  private animatedCornerRadius(
+    x: number,
+    y: number,
+    corner: number,
+    island: boolean,
+    size: number,
+  ): number {
+    if (island) return islandRadius(size);
+    const collapse = this.cornerCollapses.get(cornerCollapseKey(x, y, corner));
+    if (collapse === undefined) return tileRadius(size);
+    const progress = clamp01(
+      (performance.now() - collapse.startTime - collapse.delay) /
+        REVEAL_DURATION_MS,
+    );
+    const tile = tileRadius(size);
+    return islandRadius(size) + (tile - islandRadius(size)) * progress;
+  }
+
+  private animatedRadii(
+    x: number,
+    y: number,
+    terrain: TileTerrain,
+    size: number,
+  ): [number, number, number, number] {
+    return [
+      this.animatedCornerRadius(
+        x,
+        y,
+        CORNER_TOP_LEFT,
+        terrain.left && terrain.top,
+        size,
+      ),
+      this.animatedCornerRadius(
+        x,
+        y,
+        CORNER_TOP_RIGHT,
+        terrain.right && terrain.top,
+        size,
+      ),
+      this.animatedCornerRadius(
+        x,
+        y,
+        CORNER_BOTTOM_RIGHT,
+        terrain.right && terrain.bottom,
+        size,
+      ),
+      this.animatedCornerRadius(
+        x,
+        y,
+        CORNER_BOTTOM_LEFT,
+        terrain.left && terrain.bottom,
+        size,
+      ),
+    ];
+  }
+
   private drawRevealed(
     x: number,
     y: number,
@@ -516,8 +660,8 @@ export class Renderer {
       return;
     }
     const terrain = this.tileTerrain(x, y);
-    const radii = tileRadii(terrain, size);
-    this.paintIslandHalo(tsx, tsy, size, terrain);
+    const radii = this.animatedRadii(x, y, terrain, size);
+    this.paintIslandHalo(tsx, tsy, size, terrain, radii);
     this.drawTile(tsx, tsy, size, canvasPalette().revealed, radii);
     this.paintNotchCorners(tsx, tsy, size, terrain);
     this.ctx.globalAlpha = progress;
@@ -546,9 +690,9 @@ export class Renderer {
     sy: number,
     size: number,
     terrain: TileTerrain,
+    radii: [number, number, number, number],
   ): void {
     const cellSize = size + CELL_GAP;
-    const radius = islandRadius(size);
     this.ctx.fillStyle = canvasPalette().hidden;
     // why: bands run flush along the tile body edge and stop at the cell
     // edges — an into-body overlap only ever showed as accent tabs in the
@@ -566,23 +710,43 @@ export class Renderer {
     if (terrain.bottom) {
       this.ctx.fillRect(sx, sy + size, cellSize, 1.5);
     }
-    if (terrain.left && terrain.top) {
-      this.ctx.fillRect(sx - 1, sy - 1, radius + 2, radius + 2);
-    }
-    if (terrain.right && terrain.top) {
-      this.ctx.fillRect(sx + size - radius - 1, sy - 1, radius + 2, radius + 2);
-    }
-    if (terrain.right && terrain.bottom) {
-      this.ctx.fillRect(
-        sx + size - radius - 1,
-        sy + size - radius - 1,
-        radius + 2,
-        radius + 2,
+    this.paintHaloCorners(sx, sy, size, radii);
+  }
+
+  // why: the accent square of a corner retreats with the corner's animated
+  // radius, so a collapsing island corner keeps its crescent until it
+  // settles into the plain tile corner
+  private paintHaloCorners(
+    sx: number,
+    sy: number,
+    size: number,
+    radii: [number, number, number, number],
+  ): void {
+    for (const [corner, radius] of radii.entries()) {
+      if (radius <= tileRadius(size)) continue;
+      const left = corner === CORNER_TOP_LEFT || corner === CORNER_BOTTOM_LEFT;
+      const top = corner === CORNER_TOP_LEFT || corner === CORNER_TOP_RIGHT;
+      this.paintHaloCornerSquare(
+        left ? sx : sx + size,
+        top ? sy : sy + size,
+        left ? 1 : -1,
+        top ? 1 : -1,
+        radius,
       );
     }
-    if (terrain.left && terrain.bottom) {
-      this.ctx.fillRect(sx - 1, sy + size - radius - 1, radius + 2, radius + 2);
-    }
+  }
+
+  private paintHaloCornerSquare(
+    cornerX: number,
+    cornerY: number,
+    hx: number,
+    hy: number,
+    radius: number,
+  ): void {
+    const side = radius + 2;
+    const x = hx > 0 ? cornerX - 1 : cornerX - radius - 1;
+    const y = hy > 0 ? cornerY - 1 : cornerY - radius - 1;
+    this.ctx.fillRect(x, y, side, side);
   }
 
   // why: at a vertex with three revealed cells and one hidden cell the
@@ -978,31 +1142,62 @@ function islandRadius(size: number): number {
   return Math.min(size * ISLAND_CORNER_RADIUS_RATIO, size / 2);
 }
 
-// why: a tile corner is an island corner when both orthogonal neighbors
-// are hidden sheet — straight border runs and interior corners keep the
-// small per-tile radius, so the discovered region stays "tiled" inside
-// why: island corners (both orthogonal neighbors hidden) round far more
-// than interior corners; concave-facing corners render with the normal
-// interior radius like every other tile corner — the grout pocket
-// painted last covers their notch zone at concave vertices
-function cornerRadius(
-  orthHiddenA: boolean,
-  orthHiddenB: boolean,
-  size: number,
-): number {
-  return orthHiddenA && orthHiddenB ? islandRadius(size) : tileRadius(size);
+// why: an external corner of a previously revealed tile collapses from the
+// island radius to the tile radius when a neighboring cell is discovered;
+// the collapse is registered at reveal time because a cell's reveal progress
+// alone cannot tell a hidden cell from a long-settled one, so the corner
+// has to remember that it is still collapsing
+export function cornerCollapseRegistrations(
+  batch: readonly (readonly [number, number])[],
+  anims: ReadonlyMap<string, RevealAnimation>,
+  isRevealed: (x: number, y: number) => boolean,
+): Map<string, RevealAnimation> {
+  const batchKeys = new Set(batch.map(([x, y]) => keyOf(x, y)));
+  const queries: CornerCollapseQueries = {
+    isRevealed,
+    settledBeforeBatch: (x, y) =>
+      isRevealed(x, y) && !batchKeys.has(keyOf(x, y)),
+  };
+  const registrations = new Map<string, RevealAnimation>();
+  for (const [x, y] of batch) {
+    const driver = anims.get(keyOf(x, y));
+    if (driver === undefined) continue;
+    for (const side of CORNER_COLLAPSE_SIDES) {
+      registerNeighborCorners(
+        registrations,
+        { x: x + side.offset[0], y: y + side.offset[1] },
+        side.corners,
+        driver,
+        queries,
+      );
+    }
+  }
+  return registrations;
 }
 
-function tileRadii(
-  terrain: TileTerrain,
-  size: number,
-): [number, number, number, number] {
-  return [
-    cornerRadius(terrain.left, terrain.top, size),
-    cornerRadius(terrain.right, terrain.top, size),
-    cornerRadius(terrain.right, terrain.bottom, size),
-    cornerRadius(terrain.left, terrain.bottom, size),
-  ];
+// why: a corner of the neighbor faces the discovered cell through one of
+// its sides and hidden sheet through the other; both sides discovered
+// together leave nothing to collapse, and one key can only be reached
+// through one side, so no duplicate can occur
+function registerNeighborCorners(
+  registrations: Map<string, RevealAnimation>,
+  neighbor: Cell,
+  corners: readonly CornerCollapseSide[],
+  driver: RevealAnimation,
+  queries: CornerCollapseQueries,
+): void {
+  if (!queries.settledBeforeBatch(neighbor.x, neighbor.y)) return;
+  for (const affected of corners) {
+    const otherX = neighbor.x + affected.other[0];
+    const otherY = neighbor.y + affected.other[1];
+    if (queries.isRevealed(otherX, otherY)) continue;
+    const key = cornerCollapseKey(neighbor.x, neighbor.y, affected.corner);
+    registrations.set(key, driver);
+  }
+}
+
+function cornerCollapseKey(x: number, y: number, corner: number): string {
+  return `${keyOf(x, y)}|${String(corner)}`;
 }
 
 function buildMineSprite(

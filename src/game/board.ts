@@ -14,11 +14,11 @@ export interface DeductionState {
 }
 
 const MAX_ROLLS = 32;
-// why: every reveal must keep a bounded deterministic playout alive, so
-// an ambiguous blob is re-rolled while its chunks are still fresh instead
-// of surfacing later as a dead-end in frozen terrain. The opening click
-// needs a deeper run because the whole game starts there. Deeper tiers
-// survive longer closure playouts, so the depths scale with density
+// why: an opening - the first click or a deliberate new area - must
+// survive a deep deterministic playout, because there the whole chain of
+// certain moves is still unconstrained and re-rolls can enforce it.
+// Deeper tiers survive longer closure playouts, so the depths scale with
+// density
 const PLAYOUT_TIERS: readonly {
   readonly maxDensity: number;
   readonly opening: number;
@@ -121,7 +121,7 @@ export class Board {
     const key = keyOf(x, y);
     if (this.revealedMap.has(key) || this.flagSet.has(key)) return "ok";
     if (this.revealedMap.size === 0) this.pinArea(x, y);
-    return this.revealGroup([[x, y]]);
+    return this.revealGroup([[x, y]], this.revealedMap.size === 0);
   }
 
   // Clicking a revealed number: auto-disclose when the flags satisfy the
@@ -135,7 +135,7 @@ export class Board {
     if (count === undefined) return "ok";
     const { flagged, unknown } = this.inspectNeighbors(x, y);
     if (flagged === count && unknown.length > 0) {
-      return this.revealGroup(unknown);
+      return this.revealGroup(unknown, false);
     }
     if (count - flagged === unknown.length && unknown.length > 0) {
       const autoFlagged: [number, number][] = [];
@@ -151,6 +151,25 @@ export class Board {
   findHint(): Cell | null {
     const first = findSafeCell(this.revealedMap);
     return first === null ? null : parseKey(first);
+  }
+
+  // Deliberate escape from a marked guess zone: the layout is fixed, so a
+  // cell the board knows is not a mine is a real cell, not fabricated
+  // terrain. Only a state without a certain move may open one, and only
+  // unflagged cells of that zone qualify.
+  freeCell(): Cell | null {
+    if (this.status !== "playing") return null;
+    const state = this.deductionState();
+    if (state.certainMove) return null;
+    for (const cell of state.guessCells) {
+      const key = keyOf(cell.x, cell.y);
+      if (this.flagSet.has(key) || this.revealedMap.has(key)) continue;
+      if (this.mineAt(cell.x, cell.y)) continue;
+      return this.revealGroup([[cell.x, cell.y]], false) === "lost"
+        ? null
+        : cell;
+    }
+    return null;
   }
 
   // Cached per reveal: whether a certain move exists and which hidden
@@ -220,8 +239,10 @@ export class Board {
   // outcome: an explosion there ends the run. Later attempts are invisible
   // re-rolls of the freshly committed chunks hunting for a state where a
   // certain move exists and every enclosed pocket stays deducible.
-  private revealGroup(cells: readonly [number, number][]): ClickResult {
-    const opening = this.revealedMap.size === 0;
+  private revealGroup(
+    cells: readonly [number, number][],
+    deep: boolean,
+  ): ClickResult {
     const tier = playoutTier(this.density);
     const snap = this.snapshot();
     for (let attempt = 0; attempt < MAX_ROLLS; attempt++) {
@@ -234,7 +255,7 @@ export class Board {
         !result.exploded &&
         this.hasProgress() &&
         this.pocketsFreshlyResolved(snap) &&
-        (opening ? this.playoutSurvives(tier.opening) : true)
+        (deep ? this.playoutSurvives(tier.opening) : true)
       ) {
         this.lastRevealed = result.revealed;
         this.analysis = null;

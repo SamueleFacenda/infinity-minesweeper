@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Free cell action (`F` or the Free cell button): when no certain move exists, opens one guaranteed-safe cell of the marked guess zone - a real cell of the fixed layout, so a run never has to end in a guess
+
 ### Changed
 
 - No-guess engine rewritten: the solver propagates per-cell mine bounds across the whole frontier and enumerates small unresolved components exactly, so hints prove cells safe that the old single-point and subset passes could not reach

@@ -87,6 +87,43 @@ describe("board", () => {
     });
   }, 30_000);
 
+  it("frees a safe cell from a guess zone and keeps the run going", () => {
+    // why: a player who refuses to guess must never be forced to end a
+    // run; the free cell is a real cell of the fixed layout, so opening
+    // it never explodes
+    const target = 300;
+    for (const density of [0.3, 0.35]) {
+      let freed = 0;
+      for (let seed = 1; seed <= 3; seed++) {
+        const board = new Board(seed * 104729 + density * 1000, density);
+        board.reveal(0, 0);
+        for (let step = 0; step < 600 && board.revealedCount < target; step++) {
+          const hint = board.findHint();
+          if (hint !== null) {
+            expect(board.reveal(hint.x, hint.y)).toBe("ok");
+            continue;
+          }
+          const cell = board.freeCell();
+          if (cell === null) break;
+          freed++;
+          expect(board.isMine(cell.x, cell.y)).toBe(false);
+          expect(board.status).toBe("playing");
+        }
+        expect(board.status).toBe("playing");
+        expect(board.revealedCount).toBeGreaterThanOrEqual(target);
+      }
+      if (density >= 0.35) expect(freed).toBeGreaterThan(0);
+    }
+  }, 120_000);
+
+  it("refuses the free cell while a certain move exists", () => {
+    const board = new Board(42, 0.35);
+    board.reveal(0, 0);
+    expect(board.findHint()).not.toBeNull();
+    expect(board.freeCell()).toBeNull();
+    expect(board.revealedCount).toBeGreaterThan(0);
+  });
+
   it("never opens cells the click did not reach", () => {
     // why: the removed rescue-pin fallback revealed a disconnected
     // mine-free patch as part of an unrelated click

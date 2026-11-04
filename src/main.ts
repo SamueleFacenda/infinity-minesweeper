@@ -31,6 +31,7 @@ interface Elements {
   time: HTMLElement;
   state: HTMLElement;
   hint: HTMLButtonElement;
+  free: HTMLButtonElement;
   leaderboard: HTMLButtonElement;
   newGame: HTMLButtonElement;
   theme: HTMLButtonElement;
@@ -175,6 +176,9 @@ class Game {
     });
     this.elements.hint.addEventListener("click", () => {
       this.onHint();
+    });
+    this.elements.free.addEventListener("click", () => {
+      this.onFreeCell();
     });
     this.elements.leaderboard.addEventListener("click", () => {
       this.showModal();
@@ -496,6 +500,10 @@ class Game {
       case "H":
         this.onHint();
         return;
+      case "f":
+      case "F":
+        this.onFreeCell();
+        return;
       case "n":
       case "N":
         this.restart();
@@ -593,12 +601,27 @@ class Game {
       this.showToast(
         this.board.revealedCount === 0
           ? "Open anywhere to start - the first click is always safe"
-          : "No certain move - the marked zone needs a guess",
+          : "No certain move - open a Free cell (F) or guess in the marked zone",
       );
       return;
     }
     this.renderer.hintCell = hint;
     this.renderer.draw();
+  }
+
+  private onFreeCell(): void {
+    if (this.board.status !== "playing") return;
+    const cell = this.board.freeCell();
+    if (cell === null) {
+      this.showToast(
+        this.board.deductionState().certainMove
+          ? "A certain move exists - the free cell is only for guess zones"
+          : "No safe cell in the marked zone - start a new game (N)",
+      );
+      return;
+    }
+    this.renderer.hintCell = null;
+    this.applyResult("ok", cell);
   }
 
   private onDifficultyChange(): void {
@@ -756,6 +779,7 @@ const elements: Elements = {
   time: requireElement("stat-time", HTMLElement),
   state: requireElement("stat-state", HTMLElement),
   hint: requireElement("btn-hint", HTMLButtonElement),
+  free: requireElement("btn-free", HTMLButtonElement),
   leaderboard: requireElement("btn-leaderboard", HTMLButtonElement),
   newGame: requireElement("btn-new", HTMLButtonElement),
   theme: requireElement("btn-theme", HTMLButtonElement),

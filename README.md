@@ -22,7 +22,9 @@ local leaderboard.
   positions no re-roll can rescue are marked as guess zones instead of
   hidden or resolved by force
 - **Deterministic solving aids** - a Hint button (or `H`) highlights a
-  cell that is provably safe right now
+  cell that is provably safe right now, and a Free cell button (or `F`)
+  opens one guaranteed-safe cell of a marked guess zone, so a run never
+  has to end in a guess
 - **Fast controls** - click a satisfied number to chord (auto-disclose
   neighbors), click a number whose remaining unknowns are all mines to
   auto-fill flags; drag to pan, wheel to zoom
@@ -39,6 +41,7 @@ local leaderboard.
 | Flag / unflag     | Right click                     |
 | Chord / auto-fill | Left click on a revealed number |
 | Hint              | `H` or the Hint button          |
+| Free cell         | `F` or the Free cell button     |
 | Pan               | Drag, or arrow keys             |
 | Zoom              | Mouse wheel                     |
 | New game          | `N` or the New game button      |
@@ -78,10 +81,10 @@ minesweeper.online's (see References).
 5. When re-rolling cannot repair ambiguity that already-committed terrain
    created, the honest layout stands and the ambiguous cells are
    **marked**: the HUD shows "Guess zone: N cells", those cells carry a
-   dot on the sheet, and the Hint reports it plainly instead of claiming
-   the state is impossible. You choose whether to guess or start a new
-   game; the board never guesses for you and never opens cells you did
-   not click.
+   dot on the sheet. You then have two honest options - open one Free
+   cell (a real cell of the fixed layout that the board knows is not a
+   mine) or take your chances guessing. The board never guesses for you
+   and never opens cells you did not click.
 6. Hint runs the same solver and highlights its next certain move.
 
 The solver propagates per-cell mine bounds (lower and upper) across the

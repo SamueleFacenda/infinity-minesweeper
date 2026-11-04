@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Board } from "../../src/game/board.js";
+import { keyOf } from "../../src/game/coords.js";
 import {
   DIFFICULTIES,
   FASTEST_TARGET_TILES,
@@ -65,6 +66,47 @@ describe("board", () => {
       }
     }
   });
+
+  it("opens every difficulty with terrain that survives the playout", () => {
+    // why: the opening playout depth of the hardest tier, enforced by the
+    // generator for every difficulty
+    const guaranteed = 50;
+    DIFFICULTIES.forEach((difficulty, index) => {
+      const board = new Board(0xfeed100 + index, difficulty.density);
+      board.reveal(0, 0);
+      for (let step = 0; step < guaranteed; step++) {
+        const hint = board.findHint();
+        expect(
+          hint,
+          `${difficulty.id} stalled at step ${String(step)}`,
+        ).not.toBeNull();
+        if (hint === null) return;
+        expect(board.reveal(hint.x, hint.y)).toBe("ok");
+      }
+      expect(board.revealedCount).toBeGreaterThan(guaranteed);
+    });
+  }, 30_000);
+
+  it("never opens cells the click did not reach", () => {
+    // why: the removed rescue-pin fallback revealed a disconnected
+    // mine-free patch as part of an unrelated click
+    for (const density of [0.22, 0.3, 0.35]) {
+      for (let seed = 1; seed <= 3; seed++) {
+        const board = new Board(seed * 104729 + density * 1000, density);
+        board.reveal(0, 0);
+        for (let step = 0; step < 40; step++) {
+          const hint = board.findHint();
+          if (hint === null) break;
+          board.reveal(hint.x, hint.y);
+          if (board.lastRevealed.length === 0) continue;
+          const reached = connectedCells(board, hint);
+          for (const [x, y] of board.lastRevealed) {
+            expect(reached.has(keyOf(x, y))).toBe(true);
+          }
+        }
+      }
+    }
+  }, 30_000);
 
   it("toggles flags on hidden cells only", () => {
     const board = new Board(1, 0.17);
@@ -162,6 +204,25 @@ function neighbors(x: number, y: number): [number, number][] {
     [x, y + 1],
     [x + 1, y + 1],
   ];
+}
+
+function connectedCells(
+  board: Board,
+  from: { x: number; y: number },
+): Set<string> {
+  const reached = new Set<string>([keyOf(from.x, from.y)]);
+  const queue: [number, number][] = [[from.x, from.y]];
+  while (queue.length > 0) {
+    const current = queue.pop();
+    if (current === undefined) break;
+    for (const [nx, ny] of neighbors(current[0], current[1])) {
+      const key = keyOf(nx, ny);
+      if (reached.has(key) || !board.isRevealed(nx, ny)) continue;
+      reached.add(key);
+      queue.push([nx, ny]);
+    }
+  }
+  return reached;
 }
 
 describe("run metrics", () => {

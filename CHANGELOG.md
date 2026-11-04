@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Changed
+
+- No-guess engine rewritten: the solver propagates per-cell mine bounds across the whole frontier and enumerates small unresolved components exactly, so hints prove cells safe that the old single-point and subset passes could not reach
+- Removed the forced-opening fallback that pinned mine-free 3x3 areas and revealed them as part of an unrelated click; a reveal now only ever opens the cells it reaches
+- Fixed re-rolls being no-ops after the first attempt (chunk nonces were restored instead of incremented), so the generator actually explores a different layout per attempt
+- New per-reveal guarantees: a certain move must exist and every enclosed pocket the reveal created must be fully deducible
+- Every game now opens on terrain that survives a deterministic playout whose depth scales with difficulty, so no game stalls a few moves in
+- Stuck states are honest now: when no re-roll can rescue a position the ambiguous cells are reported and marked, the HUD shows the guess-zone size, those cells carry a dot on the hidden sheet, and the Hint message no longer claims the state is impossible
+
 - Infinite minesweeper webapp: hash-based infinite board, no-guess generation with lazy chunk re-rolling, hint, chording, auto-fill, canvas renderer, local leaderboard (biggest/fastest)
 - Nix static site package (`nix build .#site`) built with nixpkgs tsc, no bundler
 - GitHub Pages deploy workflow and CI (flake checks, typecheck, lint, vitest)

@@ -14,25 +14,26 @@ export interface DeductionState {
 }
 
 const MAX_ROLLS = 32;
-// why: the opening terrain must survive a deep deterministic playout so a
-// game never stalls a few moves in; at the first click every chunk is
-// still fresh, so re-rolling can enforce it. Deeper tiers survive longer
-// closure playouts, so the required depth scales with density
-const OPENING_PLAYOUT_TIERS: readonly {
+// why: every reveal must keep a bounded deterministic playout alive, so
+// an ambiguous blob is re-rolled while its chunks are still fresh instead
+// of surfacing later as a dead-end in frozen terrain. The opening click
+// needs a deeper run because the whole game starts there. Deeper tiers
+// survive longer closure playouts, so the depths scale with density
+const PLAYOUT_TIERS: readonly {
   readonly maxDensity: number;
-  readonly depth: number;
+  readonly opening: number;
 }[] = [
-  { maxDensity: 0.23, depth: 200 },
-  { maxDensity: 0.28, depth: 150 },
-  { maxDensity: 0.33, depth: 80 },
-  { maxDensity: Number.POSITIVE_INFINITY, depth: 50 },
+  { maxDensity: 0.23, opening: 200 },
+  { maxDensity: 0.28, opening: 150 },
+  { maxDensity: 0.33, opening: 80 },
+  { maxDensity: Number.POSITIVE_INFINITY, opening: 50 },
 ];
 
-function openingPlayoutDepth(density: number): number {
-  const tier = OPENING_PLAYOUT_TIERS.find(
+function playoutTier(density: number): { opening: number } {
+  const tier = PLAYOUT_TIERS.find(
     (candidate) => density <= candidate.maxDensity,
   );
-  return tier?.depth ?? 0;
+  return tier ?? { opening: 0 };
 }
 const AREA_OFFSETS: readonly (readonly [number, number])[] = [
   [-1, -1],
@@ -221,6 +222,7 @@ export class Board {
   // certain move exists and every enclosed pocket stays deducible.
   private revealGroup(cells: readonly [number, number][]): ClickResult {
     const opening = this.revealedMap.size === 0;
+    const tier = playoutTier(this.density);
     const snap = this.snapshot();
     for (let attempt = 0; attempt < MAX_ROLLS; attempt++) {
       const result = this.attemptReveal(cells);
@@ -232,7 +234,7 @@ export class Board {
         !result.exploded &&
         this.hasProgress() &&
         this.pocketsFreshlyResolved(snap) &&
-        (!opening || this.openingSurvives())
+        (opening ? this.playoutSurvives(tier.opening) : true)
       ) {
         this.lastRevealed = result.revealed;
         this.analysis = null;
@@ -250,8 +252,7 @@ export class Board {
   // why: the playout runs on the real board (cascade counts included), so
   // its mutated state is discarded by restoring the snapshot it started
   // from, and lastRevealed is restored by the caller
-  private openingSurvives(): boolean {
-    const depth = openingPlayoutDepth(this.density);
+  private playoutSurvives(depth: number): boolean {
     if (depth === 0) return true;
     const before = this.snapshot();
     const survives = this.playoutSolvable(depth);

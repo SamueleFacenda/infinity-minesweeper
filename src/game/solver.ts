@@ -1,9 +1,10 @@
 import { keyOf, neighborCoords, parseKey } from "./coords.js";
 
-// Constraint solver over the revealed area. Deducing with single-point
-// rules, subset rules and bounded component enumeration; results mirror
-// what a careful player could conclude, powering hints and the no-guess
-// board guarantee.
+// Constraint solver over the revealed area. Lower and upper mine bounds
+// are propagated across the whole frontier until saturation, then small
+// unresolved components are enumerated exactly; results mirror what a
+// careful player could conclude, powering hints and the no-guess board
+// guarantee.
 
 export interface SolveResult {
   readonly safe: Set<string>;
@@ -15,8 +16,15 @@ interface Constraint {
   readonly count: number;
 }
 
+// Per-cell certainty between zero and one: lower bound one is a mine in
+// every layout the constraints allow, upper bound zero is never a mine.
+interface Bounds {
+  readonly lower: ReadonlyMap<string, number>;
+  readonly upper: ReadonlyMap<string, number>;
+}
+
 const MAX_PASSES = 16;
-const MAX_ENUM_CELLS = 32;
+const MAX_ENUM_CELLS = 64;
 const MAX_ENUM_SOLUTIONS = 100_000;
 
 export function solve(revealed: ReadonlyMap<string, number>): SolveResult {
@@ -44,12 +52,25 @@ function runDeduction(
     const constraints = buildConstraints(revealed, safe, mines);
     if (constraints.length === 0) break;
     const known = safe.size + mines.size;
-    deduceSinglePoint(constraints, safe, mines);
+    const bounds = propagateBounds(constraints);
+    addResolved(bounds, safe, mines);
     if (earlyExitOnSafe && safe.size > 0) break;
-    deduceSubsets(constraints, safe, mines);
+    // why: bounds are per-cell, so they cannot express that one
+    // constraint's certainty carries over to another's extra cells
+    if (safe.size + mines.size === known) {
+      deduceSubsets(constraints, safe, mines);
+      if (earlyExitOnSafe && safe.size > 0) break;
+    }
+    if (safe.size + mines.size > known) continue;
+    const enumerated = enumerateComponents(
+      constraints,
+      bounds,
+      safe,
+      mines,
+      earlyExitOnSafe,
+    );
     if (earlyExitOnSafe && safe.size > 0) break;
-    deduceByEnumeration(constraints, safe, mines, earlyExitOnSafe);
-    if (safe.size + mines.size === known) break;
+    if (!enumerated) break;
   }
   return { safe, mines };
 }
@@ -97,18 +118,14 @@ function addAll(target: Set<string>, cells: Iterable<string>): boolean {
   return changed;
 }
 
-function deduceSinglePoint(
-  constraints: readonly Constraint[],
+function addResolved(
+  bounds: Bounds,
   safe: Set<string>,
   mines: Set<string>,
 ): void {
-  for (const constraint of constraints) {
-    if (constraint.count === 0) {
-      addAll(safe, constraint.cells);
-    } else if (constraint.count === constraint.cells.length) {
-      addAll(mines, constraint.cells);
-    }
-  }
+  const resolved = resolvedCells(bounds);
+  addAll(safe, resolved.safe);
+  addAll(mines, resolved.mines);
 }
 
 function deduceSubsets(
@@ -128,23 +145,6 @@ function deduceSubsets(
       applySubsetRule(inner, outer, safe, mines);
     }
   }
-}
-
-function indexByCell(
-  constraints: readonly Constraint[],
-): Map<string, Constraint[]> {
-  const byCell = new Map<string, Constraint[]>();
-  for (const constraint of constraints) {
-    for (const cell of constraint.cells) {
-      const list = byCell.get(cell);
-      if (list === undefined) {
-        byCell.set(cell, [constraint]);
-      } else {
-        list.push(constraint);
-      }
-    }
-  }
-  return byCell;
 }
 
 function isSubset(inner: readonly string[], outer: readonly string[]): boolean {
@@ -168,29 +168,123 @@ function applySubsetRule(
   }
 }
 
-function deduceByEnumeration(
+// why: constraints share cells, so one certainty tightens every
+// neighbouring constraint; the worklist repeats until nothing tightens,
+// which subsumes single-point and subset reasoning for the frontier.
+function propagateBounds(constraints: readonly Constraint[]): Bounds {
+  const lower = new Map<string, number>();
+  const upper = new Map<string, number>();
+  const of = indexByCell(constraints);
+  const pending = new Set<Constraint>(constraints);
+  while (pending.size > 0) {
+    const constraint = takeConstraint(pending);
+    const cells = constraint.cells;
+    let sumLower = 0;
+    let sumUpper = 0;
+    for (const cell of cells) {
+      sumLower += lower.get(cell) ?? 0;
+      sumUpper += upper.get(cell) ?? 1;
+    }
+    // why: unreachable for consistent boards, guards against propagating
+    // from a contradictory constraint
+    if (sumLower > constraint.count || sumUpper < constraint.count) continue;
+    for (const cell of cells) {
+      const floor = lower.get(cell) ?? 0;
+      const ceiling = upper.get(cell) ?? 1;
+      const nextFloor = Math.max(
+        floor,
+        constraint.count - (sumUpper - ceiling),
+      );
+      const nextCeiling = Math.min(
+        ceiling,
+        constraint.count - (sumLower - floor),
+      );
+      if (nextFloor === floor && nextCeiling === ceiling) continue;
+      lower.set(cell, nextFloor);
+      upper.set(cell, nextCeiling);
+      for (const related of of.get(cell) ?? []) pending.add(related);
+    }
+  }
+  return { lower, upper };
+}
+
+function takeConstraint(pending: Set<Constraint>): Constraint {
+  const constraint = pending.values().next().value;
+  if (constraint === undefined) throw new Error("no pending constraint");
+  pending.delete(constraint);
+  return constraint;
+}
+
+function resolvedCells(bounds: Bounds): { mines: string[]; safe: string[] } {
+  const mines: string[] = [];
+  const safe: string[] = [];
+  for (const cell of bounds.lower.keys()) {
+    if ((bounds.upper.get(cell) ?? 1) === 0) safe.push(cell);
+    else if (bounds.lower.get(cell) === 1) mines.push(cell);
+  }
+  return { mines, safe };
+}
+
+function enumerateComponents(
   constraints: readonly Constraint[],
+  bounds: Bounds,
   safe: Set<string>,
   mines: Set<string>,
   earlyExitOnSafe: boolean,
-): void {
+): boolean {
   const byCell = indexByCell(constraints);
   const components = connectedComponents(constraints, byCell);
+  let changed = false;
   for (const component of components) {
-    if (earlyExitOnSafe && safe.size > 0) return;
-    const cells = new Set<string>();
-    for (const constraint of component) {
-      for (const cell of constraint.cells) cells.add(cell);
-    }
-    if (cells.size > MAX_ENUM_CELLS) continue;
+    if (earlyExitOnSafe && safe.size > 0) return changed;
+    const pending = pendingCells(component, bounds);
+    if (pending.length === 0 || pending.length > MAX_ENUM_CELLS) continue;
     const forced = enumerateComponent(
-      orderCells([...cells], component),
+      orderCells(pending, component),
       component,
+      bounds,
     );
     if (forced === null) continue;
-    addAll(mines, forced.allMines);
-    addAll(safe, forced.allSafe);
+    if (addAll(mines, forced.allMines)) changed = true;
+    if (addAll(safe, forced.allSafe)) changed = true;
   }
+  return changed;
+}
+
+function indexByCell(
+  constraints: readonly Constraint[],
+): Map<string, Constraint[]> {
+  const byCell = new Map<string, Constraint[]>();
+  for (const constraint of constraints) {
+    for (const cell of constraint.cells) {
+      const list = byCell.get(cell);
+      if (list === undefined) {
+        byCell.set(cell, [constraint]);
+      } else {
+        list.push(constraint);
+      }
+    }
+  }
+  return byCell;
+}
+
+function isPending(cell: string, bounds: Bounds): boolean {
+  const floor = bounds.lower.get(cell) ?? 0;
+  const ceiling = bounds.upper.get(cell) ?? 1;
+  return floor < ceiling;
+}
+
+function pendingCells(
+  component: readonly Constraint[],
+  bounds: Bounds,
+): string[] {
+  const pending = new Set<string>();
+  for (const constraint of component) {
+    for (const cell of constraint.cells) {
+      if (isPending(cell, bounds)) pending.add(cell);
+    }
+  }
+  return [...pending];
 }
 
 function connectedComponents(
@@ -231,9 +325,10 @@ interface ForcedCells {
 // constraints early and prunes aggressively; arbitrary order can explode
 // combinatorially on dense frontiers.
 function orderCells(
-  cells: string[],
+  cells: readonly string[],
   component: readonly Constraint[],
 ): string[] {
+  const wanted = new Set(cells);
   const constraintsOf = new Map<string, Constraint[]>();
   for (const constraint of component) {
     for (const cell of constraint.cells) {
@@ -257,10 +352,9 @@ function orderCells(
       ordered.push(cell);
       for (const constraint of constraintsOf.get(cell) ?? []) {
         for (const neighbor of constraint.cells) {
-          if (!visited.has(neighbor)) {
-            visited.add(neighbor);
-            queue.push(neighbor);
-          }
+          if (!wanted.has(neighbor) || visited.has(neighbor)) continue;
+          visited.add(neighbor);
+          queue.push(neighbor);
         }
       }
     }
@@ -268,20 +362,27 @@ function orderCells(
   return ordered;
 }
 
-// Enumerates every satisfying assignment of a component; a cell forced in
-// all solutions is a mine, never-a-mine is safe.
+// Enumerates every satisfying assignment of a component's unresolved
+// cells; a cell mined in all solutions is a mine, never-a-mine is safe.
 function enumerateComponent(
   cells: string[],
   component: readonly Constraint[],
+  bounds: Bounds,
 ): ForcedCells | null {
   const cellLimits = new Map<string, Limit[]>();
   for (const constraint of component) {
-    const limit: Limit = {
-      count: constraint.count,
-      mines: 0,
-      future: constraint.cells.length,
-    };
+    let settled = 0;
+    let future = 0;
     for (const cell of constraint.cells) {
+      if (isPending(cell, bounds)) future++;
+      else settled += bounds.lower.get(cell) ?? 0;
+    }
+    const remaining = constraint.count - settled;
+    if (remaining < 0 || remaining > future) return null;
+    if (future === 0) continue;
+    const limit: Limit = { count: remaining, mines: 0, future };
+    for (const cell of constraint.cells) {
+      if (!isPending(cell, bounds)) continue;
       const list = cellLimits.get(cell);
       if (list === undefined) {
         cellLimits.set(cell, [limit]);
@@ -323,7 +424,7 @@ function enumerateComponent(
 
   walk(0);
   // ponytail: components above the solution cap are skipped, deduction
-  // degrades to single-point + subset rules there
+  // degrades to propagation alone there
   if (solutions >= MAX_ENUM_SOLUTIONS || solutions === 0) return null;
   const allMines: string[] = [];
   const allSafe: string[] = [];

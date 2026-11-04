@@ -613,15 +613,21 @@ class Game {
     if (this.board.status !== "playing") return;
     const cell = this.board.freeCell();
     if (cell === null) {
-      this.showToast(
-        this.board.deductionState().certainMove
-          ? "A certain move exists - the free cell is only for guess zones"
-          : "No safe cell in the marked zone - start a new game (N)",
-      );
+      this.showToast(this.freeCellRefusal());
       return;
     }
     this.renderer.hintCell = null;
     this.applyResult("ok", cell);
+  }
+
+  private freeCellRefusal(): string {
+    if (this.board.revealedCount === 0) {
+      return "Open anywhere to start - the first click is always safe";
+    }
+    if (this.board.deductionState().certainMove) {
+      return "A certain move exists - the free cell is only for guess zones";
+    }
+    return "No safe cell in the marked zone - start a new game (N)";
   }
 
   private onDifficultyChange(): void {

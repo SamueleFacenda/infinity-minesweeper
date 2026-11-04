@@ -1,6 +1,7 @@
 import type { ClickResult } from "./game/board.js";
 import { Board } from "./game/board.js";
 import type { Cell } from "./game/coords.js";
+import { keyOf } from "./game/coords.js";
 import type { Difficulty } from "./game/difficulty.js";
 import {
   DIFFICULTIES,
@@ -28,6 +29,7 @@ interface Elements {
   flags: HTMLElement;
   cleared: HTMLElement;
   time: HTMLElement;
+  state: HTMLElement;
   hint: HTMLButtonElement;
   leaderboard: HTMLButtonElement;
   newGame: HTMLButtonElement;
@@ -591,7 +593,7 @@ class Game {
       this.showToast(
         this.board.revealedCount === 0
           ? "Open anywhere to start - the first click is always safe"
-          : "No certain move is available - this should not happen, start a new game (N)",
+          : "No certain move - the marked zone needs a guess",
       );
       return;
     }
@@ -692,7 +694,24 @@ class Game {
   private updateStats(): void {
     this.elements.flags.textContent = `Flags ${String(this.board.flaggedCount)}`;
     this.elements.cleared.textContent = `Cleared ${String(this.board.revealedCount)}`;
+    this.updateGuessZone();
     this.updateTime();
+  }
+
+  // why: the board reports hidden cells that stay ambiguous after
+  // deduction; the zone is empty whenever a certain move exists
+  private updateGuessZone(): void {
+    const state = this.board.deductionState();
+    this.renderer.guessZone = new Set(
+      state.guessCells.map((cell) => keyOf(cell.x, cell.y)),
+    );
+    if (state.certainMove) {
+      this.elements.state.textContent = "";
+      this.elements.state.classList.add("hidden");
+      return;
+    }
+    this.elements.state.textContent = `Guess zone ${String(state.guessCells.length)} cells`;
+    this.elements.state.classList.remove("hidden");
   }
 
   private updateTime(): void {
@@ -735,6 +754,7 @@ const elements: Elements = {
   flags: requireElement("stat-flags", HTMLElement),
   cleared: requireElement("stat-cleared", HTMLElement),
   time: requireElement("stat-time", HTMLElement),
+  state: requireElement("stat-state", HTMLElement),
   hint: requireElement("btn-hint", HTMLButtonElement),
   leaderboard: requireElement("btn-leaderboard", HTMLButtonElement),
   newGame: requireElement("btn-new", HTMLButtonElement),

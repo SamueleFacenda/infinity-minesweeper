@@ -1,13 +1,39 @@
 import type { Cell } from "./coords.js";
 import { chunkKeyOf, keyOf, neighborCoords, parseKey } from "./coords.js";
+import { enclosedRegions } from "./regions.js";
+import type { EnclosedRegion } from "./regions.js";
 import { cellHash } from "./rng.js";
-import { findSafeCell } from "./solver.js";
+import { findSafeCell, solve } from "./solver.js";
 
 export type GameStatus = "playing" | "lost";
 export type ClickResult = "lost" | "ok";
 
+export interface DeductionState {
+  readonly certainMove: boolean;
+  readonly guessCells: readonly Cell[];
+}
+
 const MAX_ROLLS = 32;
-const MAX_FALLBACK_PINS = 12;
+// why: the opening terrain must survive a deep deterministic playout so a
+// game never stalls a few moves in; at the first click every chunk is
+// still fresh, so re-rolling can enforce it. Deeper tiers survive longer
+// closure playouts, so the required depth scales with density
+const OPENING_PLAYOUT_TIERS: readonly {
+  readonly maxDensity: number;
+  readonly depth: number;
+}[] = [
+  { maxDensity: 0.23, depth: 200 },
+  { maxDensity: 0.28, depth: 150 },
+  { maxDensity: 0.33, depth: 80 },
+  { maxDensity: Number.POSITIVE_INFINITY, depth: 50 },
+];
+
+function openingPlayoutDepth(density: number): number {
+  const tier = OPENING_PLAYOUT_TIERS.find(
+    (candidate) => density <= candidate.maxDensity,
+  );
+  return tier?.depth ?? 0;
+}
 const AREA_OFFSETS: readonly (readonly [number, number])[] = [
   [-1, -1],
   [0, -1],
@@ -22,10 +48,11 @@ const AREA_OFFSETS: readonly (readonly [number, number])[] = [
 
 // Infinite minesweeper board. Mine placement is a pure hash over
 // (seed, chunk nonce, coords); chunks are "committed" (nonce frozen) once
-// visible to the player. After every reveal the visible state is verified
-// by the solver; if the player would need to guess, the freshly committed
-// chunks are re-rolled, so no-guess play is guaranteed except in
-// astronomically rare fallback-exhausted states.
+// visible to the player. After every reveal the solver verifies that a
+// certain move exists and that every enclosed pocket of hidden cells is
+// fully deducible; failures re-roll the freshly committed chunks. A board
+// that still fails keeps its honest layout and reports the ambiguous
+// cells through deductionState instead of hiding them.
 export class Board {
   readonly seed: number;
   readonly density: number;
@@ -40,6 +67,7 @@ export class Board {
   private committed = new Set<string>();
   private nonces = new Map<string, number>();
   private pinnedSafe = new Set<string>();
+  private analysis: DeductionState | null = null;
 
   constructor(seed: number, density: number) {
     this.seed = seed;
@@ -124,6 +152,26 @@ export class Board {
     return first === null ? null : parseKey(first);
   }
 
+  // Cached per reveal: whether a certain move exists and which hidden
+  // cells next to revealed ground stay ambiguous, for the HUD and for
+  // marking the zone where the player has to guess.
+  // why: with a certain move available the zone is empty, so the full
+  // closure runs only in the stuck state that has to be marked
+  deductionState(): DeductionState {
+    if (this.analysis === null) {
+      if (findSafeCell(this.revealedMap) !== null) {
+        this.analysis = { certainMove: true, guessCells: [] };
+      } else {
+        const { safe, mines } = solve(this.revealedMap);
+        this.analysis = {
+          certainMove: false,
+          guessCells: this.ambiguousCells(safe, mines),
+        };
+      }
+    }
+    return this.analysis;
+  }
+
   private inspectNeighbors(
     x: number,
     y: number,
@@ -169,26 +217,56 @@ export class Board {
 
   // Reveals the group plus zero-cascades. The first attempt is the honest
   // outcome: an explosion there ends the run. Later attempts are invisible
-  // re-rolls of freshly committed chunks hunting for a solvable state.
+  // re-rolls of the freshly committed chunks hunting for a state where a
+  // certain move exists and every enclosed pocket stays deducible.
   private revealGroup(cells: readonly [number, number][]): ClickResult {
+    const opening = this.revealedMap.size === 0;
     const snap = this.snapshot();
-    let lastRevealed: [number, number][] = [];
     for (let attempt = 0; attempt < MAX_ROLLS; attempt++) {
       const result = this.attemptReveal(cells);
       if (result.exploded && attempt === 0) {
         this.status = "lost";
         return "lost";
       }
-      if (!result.exploded) {
-        if (this.hasProgress()) return "ok";
-        lastRevealed = result.revealed;
+      if (
+        !result.exploded &&
+        this.hasProgress() &&
+        this.pocketsFreshlyResolved(snap) &&
+        (!opening || this.openingSurvives())
+      ) {
+        this.lastRevealed = result.revealed;
+        this.analysis = null;
+        return "ok";
       }
       this.rollbackAndReroll(snap);
     }
-    if (this.tryFallbackOpenings(snap, cells, lastRevealed)) return "ok";
-    // ponytail: last resort keeps the honest board even if a guess could
-    // be needed; the solver guarantees above make this vanishingly rare
+    // why: re-rolling cannot repair an ambiguity that old committed
+    // chunks created, so the honest layout stands and the ambiguous cells
+    // are reported for marking
+    this.analysis = null;
     return this.attemptReveal(cells).exploded ? this.lose() : "ok";
+  }
+
+  // why: the playout runs on the real board (cascade counts included), so
+  // its mutated state is discarded by restoring the snapshot it started
+  // from, and lastRevealed is restored by the caller
+  private openingSurvives(): boolean {
+    const depth = openingPlayoutDepth(this.density);
+    if (depth === 0) return true;
+    const before = this.snapshot();
+    const survives = this.playoutSolvable(depth);
+    this.restore(before);
+    return survives;
+  }
+
+  private playoutSolvable(depth: number): boolean {
+    for (let step = 0; step < depth; step++) {
+      const hint = findSafeCell(this.revealedMap);
+      if (hint === null) return false;
+      const { x, y } = parseKey(hint);
+      if (this.attemptReveal([[x, y]]).exploded) return false;
+    }
+    return true;
   }
 
   private lose(): ClickResult {
@@ -229,47 +307,57 @@ export class Board {
     return findSafeCell(this.revealedMap) !== null;
   }
 
-  // Forced-opening fallback: pin a safe 3x3 around any cell whose mines
-  // were never visible and include that cell in the reveal. Candidates
-  // start at the click and expand outward to radius five, so a reveal
-  // that would dead-end inside a dense mine wall still opens fresh
-  // ground instead of leaving the board stuck.
-  private tryFallbackOpenings(
-    snap: Snapshot,
-    cells: readonly [number, number][],
-    revealedCandidates: readonly [number, number][],
-  ): boolean {
-    const candidates = [
-      ...cells,
-      ...[...revealedCandidates].reverse().slice(0, 16),
-      ...rescueRings(cells, 1, 5),
-    ];
-    let pins = 0;
-    for (const [cx, cy] of candidates) {
-      if (pins >= MAX_FALLBACK_PINS) break;
-      if (!this.areaPinnable(snap, cx, cy)) continue;
-      pins++;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        this.restore(snap);
-        this.pinArea(cx, cy);
-        const result = this.attemptReveal([...cells, [cx, cy]]);
-        if (!result.exploded && this.hasProgress()) return true;
-        this.rollbackAndReroll(snap);
-      }
+  // why: a pocket whose ambiguous cells all sit in chunks the re-roll
+  // cannot touch is permanently ambiguous; re-rolling only the fresh
+  // chunks repairs what this reveal's own terrain created
+  private pocketsFreshlyResolved(snap: Snapshot): boolean {
+    const fresh = new Set<string>();
+    for (const chunkKey of this.committed) {
+      if (!snap.committed.has(chunkKey)) fresh.add(chunkKey);
     }
-    this.restore(snap);
-    return false;
+    if (fresh.size === 0) return true;
+    return enclosedRegions(this.revealedMap).every((pocket) =>
+      pocket.bordered.every((cell) => {
+        const { x, y } = parseKey(cell);
+        return fresh.has(chunkKeyOf(x, y));
+      })
+        ? this.pocketDeducible(pocket)
+        : true,
+    );
   }
 
-  private areaPinnable(snap: Snapshot, x: number, y: number): boolean {
-    for (const [dx, dy] of AREA_OFFSETS) {
-      const key = keyOf(x + dx, y + dy);
-      if (snap.revealed.has(key)) return false;
-      for (const [nx, ny] of neighborCoords(x + dx, y + dy)) {
-        if (snap.revealed.has(keyOf(nx, ny))) return false;
+  // why: a pocket's constraints come only from the revealed cells touching
+  // it, so solving that local view decides the pocket without running the
+  // whole-board solver
+  private pocketDeducible(pocket: EnclosedRegion): boolean {
+    const local = new Map<string, number>();
+    for (const cell of pocket.bordered) {
+      const { x, y } = parseKey(cell);
+      for (const [nx, ny] of neighborCoords(x, y)) {
+        const key = keyOf(nx, ny);
+        const count = this.revealedMap.get(key);
+        if (count !== undefined) local.set(key, count);
       }
     }
-    return true;
+    const { safe, mines } = solve(local);
+    return pocket.bordered.every((cell) => safe.has(cell) || mines.has(cell));
+  }
+
+  private ambiguousCells(
+    safe: ReadonlySet<string>,
+    mines: ReadonlySet<string>,
+  ): Cell[] {
+    const ambiguous = new Set<string>();
+    for (const [key] of this.revealedMap) {
+      const { x, y } = parseKey(key);
+      for (const [nx, ny] of neighborCoords(x, y)) {
+        const neighborKey = keyOf(nx, ny);
+        if (this.revealedMap.has(neighborKey)) continue;
+        if (safe.has(neighborKey) || mines.has(neighborKey)) continue;
+        ambiguous.add(neighborKey);
+      }
+    }
+    return [...ambiguous].map(parseKey);
   }
 
   private rollbackAndReroll(snap: Snapshot): void {
@@ -278,6 +366,9 @@ export class Board {
       if (!snap.committed.has(chunkKey)) fresh.add(chunkKey);
     }
     this.restore(snap);
+    // why: nonces persist across the restore so each attempt re-rolls the
+    // fresh chunks onto a new layout; restoring them would replay nonce one
+    // every time and make every attempt identical
     for (const chunkKey of fresh) {
       this.nonces.set(chunkKey, (this.nonces.get(chunkKey) ?? 0) + 1);
     }
@@ -287,7 +378,6 @@ export class Board {
     return {
       revealed: new Map(this.revealedMap),
       committed: new Set(this.committed),
-      nonces: new Map(this.nonces),
       pinnedSafe: new Set(this.pinnedSafe),
     };
   }
@@ -296,7 +386,6 @@ export class Board {
     this.revealedMap.clear();
     for (const [key, count] of snap.revealed) this.revealedMap.set(key, count);
     this.committed = new Set(snap.committed);
-    this.nonces = new Map(snap.nonces);
     this.pinnedSafe = new Set(snap.pinnedSafe);
   }
 }
@@ -304,28 +393,5 @@ export class Board {
 interface Snapshot {
   revealed: Map<string, number>;
   committed: Set<string>;
-  nonces: Map<string, number>;
   pinnedSafe: Set<string>;
-}
-
-// Cells at Chebyshev distance one to five from the click targets,
-// nearest first: ground a frontier click cannot have made visible, so
-// pinning there is always invisible to the player.
-function rescueRings(
-  cells: readonly [number, number][],
-  minRadius: number,
-  maxRadius: number,
-): [number, number][] {
-  const ring: [number, number][] = [];
-  for (let radius = minRadius; radius <= maxRadius; radius++) {
-    for (const [x, y] of cells) {
-      for (let dx = -radius; dx <= radius; dx++) {
-        for (let dy = -radius; dy <= radius; dy++) {
-          if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue;
-          ring.push([x + dx, y + dy]);
-        }
-      }
-    }
-  }
-  return ring;
 }

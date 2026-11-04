@@ -71,6 +71,11 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+#stat-state {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .hud-theme {
   display: flex;
   align-items: center;

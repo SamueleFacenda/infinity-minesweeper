@@ -14,9 +14,13 @@ function guidedSteps(density: number): number {
 function playGuided(board: Board, steps: number): void {
   for (let step = 0; step < steps; step++) {
     const hint = board.findHint();
-    // why: the no-guess guarantee means a certain move always exists
-    expect(hint, "board stuck without a certain move").not.toBeNull();
-    if (hint === null) return;
+    if (hint === null) {
+      // why: the generator either keeps a certain move available or the
+      // board marks the ambiguous zone; a stuck board without a marking
+      // is the failure this guards against
+      expect(board.deductionState().guessCells.length).toBeGreaterThan(0);
+      return;
+    }
     expect(board.reveal(hint.x, hint.y)).toBe("ok");
     expect(board.status).toBe("playing");
   }

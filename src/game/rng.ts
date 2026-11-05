@@ -18,8 +18,15 @@ function fmix32(h: number): number {
 // within a handful of moves, which is what used to stall runs; the
 // modulation keeps the average density at the difficulty level while
 // making most chunks tractable. Measured at 35%: the median deterministic
-// chain grew ~15x with the mine fraction still at the target level
+// chain grew ~7x with the mine fraction still at the target level
 const QUOTA_AMPLITUDE = 1;
+// why: the spread is peaked, so most chunks stay at the nominal density
+// and the difficulty reads uniform, while only rare chunks swing far
+// enough to anchor a long chain; a flat spread made half the board empty
+// islands and half walls, which read as a grid and tripled the cascades.
+// The floor keeps every chunk above this fraction of the nominal density,
+// so no empty islands remain to walk through
+const QUOTA_FLOOR_RATIO = 0.6;
 // why: easy tiers never stalled and their cascades grow the frontier fast,
 // so modulating them only costs per-step time; the deep tiers are where a
 // uniform frontier turns ambiguous within a few moves
@@ -45,9 +52,11 @@ export function blockQuota(
       (searchable ? Math.imul(nonce + 1, 0x27d4eb2f) : 0),
   );
   if (density < QUOTA_FLOOR_DENSITY) return density;
-  const spread = (noise / 4294967296) * 2 - 1;
+  const flat = (noise / 4294967296) * 2 - 1;
+  const spread = Math.sign(flat) * flat * flat;
   const quota = density * (1 + QUOTA_AMPLITUDE * spread);
-  return Math.min(0.9, Math.max(0.02, quota));
+  const low = density * QUOTA_FLOOR_RATIO;
+  return Math.min(0.9, Math.max(low, quota));
 }
 
 export function cellHash(

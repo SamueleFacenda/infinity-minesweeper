@@ -69,13 +69,16 @@ minesweeper.online's (see References).
 1. A cell's mine status is a hash of `(seed, chunk nonce, x, y)` - the
    infinite board is fully defined yet stored nowhere.
 2. Every chunk draws its own mine quota around the difficulty density
-   (`density * (1 + noise)`, noise uniform in [-1, 1]), so the board
-   alternates ground deduction can chew through and ground that stays
-   dense while the global mine fraction stays at the difficulty level. A
-   uniform frontier at Insane density is ambiguous within a handful of
-   moves; the quota modulation keeps the median deterministic chain above
-   a thousand moves at every tier. Quotas stay uniform below Expert,
-   because those tiers never stalled and their cascades are expensive.
+   (`density * (1 + spread)`, `spread = sign(u) * u^2` for uniform `u` in
+   [-1, 1], floored at 60% of the density), so the board still alternates
+   ground deduction can chew through and ground that stays dense while
+   the global mine fraction stays at the difficulty level. A uniform
+   frontier at Insane density is ambiguous within a handful of moves;
+   the peaked spread keeps most chunks at the nominal density - the
+   difficulty reads uniform - while only rare chunks swing far enough to
+   anchor a chain, and the floor leaves no empty islands to walk through.
+   Quotas stay uniform below Expert, because those tiers never stalled
+   and their cascades are expensive.
 3. Chunks (16×16) become **committed** (nonce frozen) once they are visible
    to the player; before commitment the generator may re-roll them
    invisibly. A chunk's quota freezes with its first visible number, so

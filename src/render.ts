@@ -42,6 +42,9 @@ const REVEAL_DURATION_MS = 300;
 const REVEAL_STAGGER_MS = 50;
 const FLAG_ANIMATION_MS = 260;
 const LOSS_RING_MS = 1200;
+// why: a cell's count is the number of adjacent mines, capped at the eight
+// neighbors; the glyph atlas holds one slot per possible count
+const MAX_ADJACENT_MINES = 8;
 
 interface RevealAnimation {
   readonly startTime: number;
@@ -154,7 +157,21 @@ interface ConcavePaint {
 }
 
 interface MineSprite {
-  readonly cellSize: number;
+  readonly size: number;
+  readonly colors: string;
+  readonly ratio: number;
+  readonly canvas: HTMLCanvasElement;
+}
+
+interface NumberSprite {
+  readonly size: number;
+  readonly colors: string;
+  readonly ratio: number;
+  readonly canvas: HTMLCanvasElement;
+}
+
+interface FlagSprite {
+  readonly size: number;
   readonly colors: string;
   readonly ratio: number;
   readonly canvas: HTMLCanvasElement;
@@ -187,6 +204,8 @@ export class Renderer {
   private animFrame: number | null = null;
   private drawPending = false;
   private mineSprite: MineSprite | null = null;
+  private numberSprite: NumberSprite | null = null;
+  private flagSprite: FlagSprite | null = null;
   readonly reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
     .matches;
   // why: the per-tile white flash on reveal reads as a full-screen strobe
@@ -220,7 +239,12 @@ export class Renderer {
     const width = this.canvas.clientWidth;
     const height = this.canvas.clientHeight;
     const palette = canvasPalette();
+    // why: one fill covers the whole hidden sheet — per-cell rects only
+    // existed to hide seams that a single fill cannot produce, and the
+    // per-cell fill was the dominant op count when zoomed out
     this.ctx.fillStyle = palette.background;
+    this.ctx.fillRect(0, 0, width, height);
+    this.ctx.fillStyle = palette.hidden;
     this.ctx.fillRect(0, 0, width, height);
     // why: cell lines snap to a quarter-device-pixel lattice so every
     // tile and band edge straddles two device pixels and antialiases
@@ -425,32 +449,14 @@ export class Renderer {
     );
   }
 
-  // why: the overlap keeps shared sheet seams fully covered; overdraw
-  // toward a revealed tile serves nothing there — its body repaints the
-  // straight stretches — and only shows as an accent sliver inside its
-  // rounded corner notches
-  private sheetEdgeOverdraw(x: number, y: number): number {
-    return this.board.isRevealed(x, y) ? 0 : SHEET_OVERDRAW_PX;
-  }
-
+  // why: the hidden sheet is one viewport-wide accent fill drawn before
+  // this pass, so a hidden cell only paints what sits on top of it —
+  // hover, flags, mines, hint
   private drawSheetCell(x: number, y: number): void {
     const sx = this.snapX(x);
     const sy = this.snapY(y);
-    const cellW = this.snapX(x + 1) - sx;
-    const cellH = this.snapY(y + 1) - sy;
     const board = this.board;
     const key = keyOf(x, y);
-    const left = this.sheetEdgeOverdraw(x - 1, y);
-    const top = this.sheetEdgeOverdraw(x, y - 1);
-    const right = this.sheetEdgeOverdraw(x + 1, y);
-    const bottom = this.sheetEdgeOverdraw(x, y + 1);
-    this.ctx.fillStyle = canvasPalette().hidden;
-    this.ctx.fillRect(
-      sx - left,
-      sy - top,
-      cellW + left + right,
-      cellH + top + bottom,
-    );
     const hovered =
       this.hoverCell !== null &&
       this.hoverCell.x === x &&
@@ -655,11 +661,12 @@ export class Renderer {
     size: number,
     progress: number,
   ): void {
+    const terrain = this.tileTerrain(x, y);
+    this.paintMortar(tsx, tsy, size, terrain);
     if (progress <= 0) {
       this.drawSheetRect(tsx, tsy, size + CELL_GAP);
       return;
     }
-    const terrain = this.tileTerrain(x, y);
     const radii = this.animatedRadii(x, y, terrain, size);
     this.paintIslandHalo(tsx, tsy, size, terrain, radii);
     this.drawTile(tsx, tsy, size, canvasPalette().revealed, radii);
@@ -680,6 +687,42 @@ export class Renderer {
     if (hasConcaveCorner(terrain)) {
       this.concavePaints.push({ x, y, sx: tsx, sy: tsy, size, terrain });
     }
+  }
+
+  // why: the sheet is one viewport-wide accent fill, so the base under a
+  // tile — the mortar strips toward revealed neighbors and the rounded
+  // corner notches the per-cell sheet left dark — must be repainted, or
+  // the island interior reads as an accent grid with accent crosses at
+  // every four-cell intersection. Two grid rules keep the repaint
+  // invisible: the rect snaps to the device-pixel grid, because a
+  // fractional edge would antialias the background against the accent
+  // sheet into a sharp accent line along every boundary; and it
+  // overlaps one device pixel toward revealed neighbors, because the
+  // eased pitch is fractional mid-glide and rounding each box alone can
+  // leave a one-pixel gap that flashes the sheet through the mortar.
+  // Sides facing hidden terrain stay unexpanded so the halo band still
+  // owns the island edge, and the tile keeps its own quarter-pixel
+  // edges — tiles still antialias softly over this pure dark base,
+  // exactly as the per-cell sheet left them
+  private paintMortar(
+    sx: number,
+    sy: number,
+    size: number,
+    terrain: TileTerrain,
+  ): void {
+    const ratio = this.lattice.dpr;
+    const pitch = size + CELL_GAP;
+    const x = Math.round(sx * ratio) / ratio;
+    const y = Math.round(sy * ratio) / ratio;
+    const width = Math.round(pitch * ratio) / ratio;
+    const overlap = 1 / ratio;
+    this.ctx.fillStyle = canvasPalette().background;
+    this.ctx.fillRect(
+      x,
+      y,
+      width + (terrain.right ? 0 : overlap),
+      width + (terrain.bottom ? 0 : overlap),
+    );
   }
 
   // why: the accent halo fills the border zone around a tile (the gaps the
@@ -983,13 +1026,67 @@ export class Renderer {
   ): void {
     const count = this.board.countAt(x, y);
     if (count === undefined || count === 0) return;
-    const palette = canvasPalette().numbers;
-    const fallback = palette[palette.length - 1] ?? "#ffffff";
-    this.ctx.fillStyle = palette[(count - 1) % palette.length] ?? fallback;
-    this.ctx.font = `600 ${String(Math.round(size * 0.5))}px system-ui, sans-serif`;
-    this.ctx.textAlign = "center";
-    this.ctx.textBaseline = "middle";
-    this.ctx.fillText(String(count), sx + size / 2, sy + size / 2 + 1);
+    const sprite = this.numberSpriteFor(size);
+    const slot = sprite.size * sprite.ratio;
+    this.ctx.drawImage(
+      sprite.canvas,
+      (count - 1) * slot,
+      0,
+      slot,
+      slot,
+      sx,
+      sy,
+      size,
+      size,
+    );
+  }
+
+  // why: numbers repaint on every frame while zooming; rasterizing the
+  // glyph set once per zoom level replaces a per-cell font parse, fill
+  // style and text raster with a single drawImage, and the atlas covers
+  // the counts of all visible cells instead of rebuilding per digit.
+  // The render size is bucketed because the eased lattice pitch takes a
+  // new value every glide frame — keying on the exact size would rebuild
+  // the atlas each frame, and a sub-2px glyph rescale is invisible
+  private numberSpriteFor(size: number): NumberSprite {
+    const palette = canvasPalette();
+    const colors = palette.numbers.join(",");
+    const ratio = window.devicePixelRatio;
+    const bucket = numberSpriteBucket(size);
+    const current = this.numberSprite;
+    if (
+      current !== null &&
+      current.size === bucket &&
+      current.colors === colors &&
+      current.ratio === ratio
+    ) {
+      return current;
+    }
+    const canvas = buildNumberSprite(bucket, palette, ratio);
+    this.numberSprite = { size: bucket, colors, ratio, canvas };
+    return this.numberSprite;
+  }
+
+  // why: a resting flag is a fixed drawing redrawn on every frame while
+  // zooming; the bucketed raster replaces its path operations with one
+  // drawImage. Only the raise/remove animation still draws live paths
+  private flagSpriteFor(size: number): HTMLCanvasElement {
+    const palette = canvasPalette();
+    const colors = flagSpriteColors(palette);
+    const ratio = window.devicePixelRatio;
+    const bucket = numberSpriteBucket(size);
+    const current = this.flagSprite;
+    if (
+      current !== null &&
+      current.size === bucket &&
+      current.colors === colors &&
+      current.ratio === ratio
+    ) {
+      return current.canvas;
+    }
+    const canvas = buildFlagSprite(bucket, palette, ratio);
+    this.flagSprite = { size: bucket, colors, ratio, canvas };
+    return canvas;
   }
 
   private drawFlag(
@@ -999,7 +1096,7 @@ export class Renderer {
     anim: FlagAnimation | null,
   ): void {
     if (anim === null) {
-      this.paintFlag(sx, sy, size, { pole: 1, pennant: 1, alpha: 1 });
+      this.ctx.drawImage(this.flagSpriteFor(size), sx, sy, size, size);
       return;
     }
     const t = clamp01((performance.now() - anim.startTime) / FLAG_ANIMATION_MS);
@@ -1021,40 +1118,7 @@ export class Renderer {
     size: number,
     raise: FlagRaiseState,
   ): void {
-    const palette = canvasPalette();
-    const cx = sx + size * 0.42;
-    const baseY = sy + size * 0.78;
-    const topY = sy + size * 0.22;
-    const poleTop = baseY + (topY - baseY) * raise.pole;
-    const poleWidth = Math.max(1.5, size * 0.06);
-    this.ctx.globalAlpha = raise.alpha;
-    this.ctx.lineCap = "round";
-    this.ctx.strokeStyle = palette.grid;
-    this.ctx.lineWidth = poleWidth + Math.max(2, size * 0.07);
-    this.ctx.beginPath();
-    this.ctx.moveTo(cx, baseY);
-    this.ctx.lineTo(cx, poleTop);
-    this.ctx.stroke();
-    this.ctx.strokeStyle = palette.flagPole;
-    this.ctx.lineWidth = poleWidth;
-    this.ctx.beginPath();
-    this.ctx.moveTo(cx, baseY);
-    this.ctx.lineTo(cx, poleTop);
-    this.ctx.stroke();
-    if (raise.pennant > 0) {
-      const pennantY = baseY + (topY - baseY) * raise.pennant;
-      this.ctx.beginPath();
-      this.ctx.moveTo(cx, pennantY);
-      this.ctx.lineTo(cx + size * 0.3, pennantY + size * 0.14);
-      this.ctx.lineTo(cx, pennantY + size * 0.28);
-      this.ctx.closePath();
-      this.ctx.strokeStyle = palette.grid;
-      this.ctx.lineWidth = Math.max(1.5, size * 0.05);
-      this.ctx.stroke();
-      this.ctx.fillStyle = palette.flag;
-      this.ctx.fill();
-    }
-    this.ctx.globalAlpha = 1;
+    drawFlagPath(this.ctx, sx, sy, size, canvasPalette(), raise);
   }
 
   // why: after loss, a flag on a safe cell is the player's mistake; grid
@@ -1098,23 +1162,28 @@ export class Renderer {
   }
 
   // why: after loss the viewport can hold thousands of mines; a cached
-  // raster replaces a dozen path operations per mine with one drawImage
+  // raster replaces a dozen path operations per mine with one drawImage.
+  // The render size is bucketed because the eased lattice pitch changes
+  // every glide frame — keying on the exact size rebuilds per frame, and
+  // a sub-2px mine rescale is invisible
   private mineSpriteFor(
     size: number,
     palette: CanvasPalette,
   ): HTMLCanvasElement {
     const ratio = window.devicePixelRatio;
     const colors = mineSpriteColors(palette);
+    const bucket = numberSpriteBucket(size);
     const current = this.mineSprite;
     if (
-      current?.cellSize === this.cellSize &&
+      current !== null &&
+      current.size === bucket &&
       current.colors === colors &&
       current.ratio === ratio
     ) {
       return current.canvas;
     }
-    const canvas = buildMineSprite(size, palette, ratio);
-    this.mineSprite = { cellSize: this.cellSize, colors, ratio, canvas };
+    const canvas = buildMineSprite(bucket, palette, ratio);
+    this.mineSprite = { size: bucket, colors, ratio, canvas };
     return canvas;
   }
 
@@ -1232,6 +1301,108 @@ function buildMineSprite(
   ctx.scale(ratio, ratio);
   paintMine(ctx, size, palette);
   return canvas;
+}
+
+// algorithm: one slot per adjacent count, each rendered with the exact
+// geometry the direct path used — same font string, weight and the +1px
+// baseline bias — so blitting a slot reproduces fillText pixel-for-pixel
+// at a fraction of the per-cell cost
+function buildNumberSprite(
+  size: number,
+  palette: CanvasPalette,
+  ratio: number,
+): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.ceil(size * MAX_ADJACENT_MINES * ratio));
+  canvas.height = Math.max(1, Math.ceil(size * ratio));
+  const ctx = canvas.getContext("2d");
+  if (ctx === null) throw new Error("sprite 2d context unavailable");
+  ctx.scale(ratio, ratio);
+  const fontSize = Math.max(1, Math.round(size * 0.5));
+  ctx.font = `600 ${String(fontSize)}px system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const fallback = palette.numbers[palette.numbers.length - 1] ?? "#ffffff";
+  for (let count = 1; count <= MAX_ADJACENT_MINES; count++) {
+    ctx.fillStyle =
+      palette.numbers[(count - 1) % palette.numbers.length] ?? fallback;
+    ctx.fillText(String(count), (count - 0.5) * size, size / 2 + 1);
+  }
+  return canvas;
+}
+
+// why: the eased lattice pitch takes a fresh float every glide frame;
+// bucketing keeps the number of cached atlases in the low tens over a
+// full zoom range instead of one per frame
+function numberSpriteBucket(size: number): number {
+  return Math.max(2, Math.round(size / 2) * 2);
+}
+
+// algorithm: raise = pole grows from the tile, then the pennant slides up
+// with a slight overshoot; removal plays the same curve reversed + fade.
+// Pole and pennant draw over a dark underlay so they stay readable when
+// the accent sheet matches their color. Kept as a free function so the
+// sprite builder and the animation path share one drawing
+function drawFlagPath(
+  ctx: CanvasRenderingContext2D,
+  sx: number,
+  sy: number,
+  size: number,
+  palette: CanvasPalette,
+  raise: FlagRaiseState,
+): void {
+  const cx = sx + size * 0.42;
+  const baseY = sy + size * 0.78;
+  const topY = sy + size * 0.22;
+  const poleTop = baseY + (topY - baseY) * raise.pole;
+  const poleWidth = Math.max(1.5, size * 0.06);
+  ctx.globalAlpha = raise.alpha;
+  ctx.lineCap = "round";
+  ctx.strokeStyle = palette.grid;
+  ctx.lineWidth = poleWidth + Math.max(2, size * 0.07);
+  ctx.beginPath();
+  ctx.moveTo(cx, baseY);
+  ctx.lineTo(cx, poleTop);
+  ctx.stroke();
+  ctx.strokeStyle = palette.flagPole;
+  ctx.lineWidth = poleWidth;
+  ctx.beginPath();
+  ctx.moveTo(cx, baseY);
+  ctx.lineTo(cx, poleTop);
+  ctx.stroke();
+  if (raise.pennant > 0) {
+    const pennantY = baseY + (topY - baseY) * raise.pennant;
+    ctx.beginPath();
+    ctx.moveTo(cx, pennantY);
+    ctx.lineTo(cx + size * 0.3, pennantY + size * 0.14);
+    ctx.lineTo(cx, pennantY + size * 0.28);
+    ctx.closePath();
+    ctx.strokeStyle = palette.grid;
+    ctx.lineWidth = Math.max(1.5, size * 0.05);
+    ctx.stroke();
+    ctx.fillStyle = palette.flag;
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function buildFlagSprite(
+  size: number,
+  palette: CanvasPalette,
+  ratio: number,
+): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.ceil(size * ratio));
+  canvas.height = Math.max(1, Math.ceil(size * ratio));
+  const ctx = canvas.getContext("2d");
+  if (ctx === null) throw new Error("sprite 2d context unavailable");
+  ctx.scale(ratio, ratio);
+  drawFlagPath(ctx, 0, 0, size, palette, { pole: 1, pennant: 1, alpha: 1 });
+  return canvas;
+}
+
+function flagSpriteColors(palette: CanvasPalette): string {
+  return `${palette.grid}/${palette.flagPole}/${palette.flag}`;
 }
 
 function paintMine(

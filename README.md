@@ -68,24 +68,35 @@ minesweeper.online's (see References).
 
 1. A cell's mine status is a hash of `(seed, chunk nonce, x, y)` - the
    infinite board is fully defined yet stored nowhere.
-2. Chunks (16×16) become **committed** (nonce frozen) once they are visible
+2. Every chunk draws its own mine quota around the difficulty density
+   (`density * (1 + noise)`, noise uniform in [-1, 1]), so the board
+   alternates ground deduction can chew through and ground that stays
+   dense while the global mine fraction stays at the difficulty level. A
+   uniform frontier at Insane density is ambiguous within a handful of
+   moves; the quota modulation keeps the median deterministic chain above
+   a thousand moves at every tier. Quotas stay uniform below Expert,
+   because those tiers never stalled and their cascades are expensive.
+3. Chunks (16×16) become **committed** (nonce frozen) once they are visible
    to the player; before commitment the generator may re-roll them
-   invisibly.
-3. Every reveal plays out tentatively; the solver then checks that the
+   invisibly. A chunk's quota freezes with its first visible number, so
+   no settled region ever changes density; only the opening reveal
+   searches over the quotas of its still-unrevealed chunks, and whatever
+   it picks is frozen the moment the numbers are shown.
+4. Every reveal plays out tentatively; the solver then checks that the
    visible position contains at least one provably safe cell and that
    every enclosed pocket the reveal created is fully deducible. If either
    check fails, the freshly committed chunks are re-rolled.
-4. The opening click also requires a deterministic playout of a depth
-   scaled by density, so every game starts on terrain that stays solvable
-   well past the first moves.
-5. When re-rolling cannot repair ambiguity that already-committed terrain
+5. The opening click also requires a deterministic playout scaled by
+   density (25 to 60 moves), so every game starts on terrain that stays
+   solvable well past the first moves.
+6. When re-rolling cannot repair ambiguity that already-committed terrain
    created, the honest layout stands and the ambiguous cells are
    **marked**: the HUD shows "Guess zone: N cells", those cells carry a
    dot on the sheet. You then have two honest options - open one Free
    cell (a real cell of the fixed layout that the board knows is not a
    mine) or take your chances guessing. The board never guesses for you
    and never opens cells you did not click.
-6. Hint runs the same solver and highlights its next certain move.
+7. Hint runs the same solver and highlights its next certain move.
 
 The solver propagates per-cell mine bounds (lower and upper) across the
 whole frontier until they stop tightening, then enumerates small

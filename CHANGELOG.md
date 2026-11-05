@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Mine placement is quota-modulated per chunk: each 16×16 chunk draws its own mine quota around the difficulty density (uniform noise in [-1, 1], frozen on first visibility), so the frontier alternates tractable and dense ground while the global mine fraction stays at the tier. Measured at Insane: the median deterministic chain grew from ~67 to beyond 1200 moves with the mine fraction at 34%; below Expert the distribution stays uniform because those tiers never stalled and their cascades are expensive
+- The opening reveal now searches over the quotas of its unrevealed chunks and freezes them with the first visible numbers, so a cramped first click can still open a playable game without any committed number ever changing
+- Opening playout depth is scaled by density (25 moves on easy up to 60 on insane) instead of a single deep requirement
+
 - No-guess engine rewritten: the solver propagates per-cell mine bounds across the whole frontier and enumerates small unresolved components exactly, so hints prove cells safe that the old single-point and subset passes could not reach
 - Removed the forced-opening fallback that pinned mine-free 3x3 areas and revealed them as part of an unrelated click; a reveal now only ever opens the cells it reaches
 - Fixed re-rolls being no-ops after the first attempt (chunk nonces were restored instead of incremented), so the generator actually explores a different layout per attempt

@@ -1,8 +1,14 @@
 import type { Cell } from "./coords.js";
-import { chunkKeyOf, keyOf, neighborCoords, parseKey } from "./coords.js";
+import {
+  CHUNK_SIZE,
+  chunkKeyOf,
+  keyOf,
+  neighborCoords,
+  parseKey,
+} from "./coords.js";
 import { enclosedRegions } from "./regions.js";
 import type { EnclosedRegion } from "./regions.js";
-import { cellHash } from "./rng.js";
+import { blockQuota, cellHash } from "./rng.js";
 import { findSafeCell, solve } from "./solver.js";
 
 export type GameStatus = "playing" | "lost";
@@ -19,14 +25,18 @@ const MAX_ROLLS = 32;
 // certain moves is still unconstrained and re-rolls can enforce it.
 // Deeper tiers survive longer closure playouts, so the depths scale with
 // density
+// why: the modulated quota already produces long natural chains, so the
+// opening only needs a modest guarantee; deeper playouts cost more per
+// attempt than they add in certainty, and low densities pay the most per
+// attempt because their cascades grow the frontier fast
 const PLAYOUT_TIERS: readonly {
   readonly maxDensity: number;
   readonly opening: number;
 }[] = [
-  { maxDensity: 0.23, opening: 200 },
-  { maxDensity: 0.28, opening: 150 },
-  { maxDensity: 0.33, opening: 80 },
-  { maxDensity: Number.POSITIVE_INFINITY, opening: 50 },
+  { maxDensity: 0.23, opening: 25 },
+  { maxDensity: 0.28, opening: 40 },
+  { maxDensity: 0.33, opening: 50 },
+  { maxDensity: Number.POSITIVE_INFINITY, opening: 60 },
 ];
 
 function playoutTier(density: number): { opening: number } {
@@ -35,6 +45,7 @@ function playoutTier(density: number): { opening: number } {
   );
   return tier ?? { opening: 0 };
 }
+
 const AREA_OFFSETS: readonly (readonly [number, number])[] = [
   [-1, -1],
   [0, -1],
@@ -68,6 +79,13 @@ export class Board {
   private committed = new Set<string>();
   private nonces = new Map<string, number>();
   private pinnedSafe = new Set<string>();
+  // why: true only while the opening reveal searches over chunk quotas,
+  // so a cramped first click can still find an openable game
+  private quotaSearchable = false;
+  // why: the quota each chunk settled on, frozen the moment its numbers
+  // were shown; a searchable quota that stayed live would silently move
+  // mines under numbers the player had already read
+  private readonly chunkQuotas = new Map<string, number>();
   private analysis: DeductionState | null = null;
 
   constructor(seed: number, density: number) {
@@ -209,8 +227,20 @@ export class Board {
   private mineAt(x: number, y: number): boolean {
     const key = keyOf(x, y);
     if (this.pinnedSafe.has(key)) return false;
-    const nonce = this.nonces.get(chunkKeyOf(x, y)) ?? 0;
-    return cellHash(this.seed, nonce, x, y) < this.density;
+    const chunkKey = chunkKeyOf(x, y);
+    const nonce = this.nonces.get(chunkKey) ?? 0;
+    const frozen = this.chunkQuotas.get(chunkKey);
+    const quota =
+      frozen ??
+      blockQuota(
+        this.seed,
+        Math.floor(x / CHUNK_SIZE),
+        Math.floor(y / CHUNK_SIZE),
+        this.density,
+        nonce,
+        this.quotaSearchable,
+      );
+    return cellHash(this.seed, nonce, x, y) < quota;
   }
 
   private adjacentMines(x: number, y: number): number {
@@ -243,22 +273,26 @@ export class Board {
     cells: readonly [number, number][],
     deep: boolean,
   ): ClickResult {
-    const tier = playoutTier(this.density);
+    const opening = this.revealedMap.size === 0;
+    this.quotaSearchable = opening;
     const snap = this.snapshot();
     for (let attempt = 0; attempt < MAX_ROLLS; attempt++) {
       const result = this.attemptReveal(cells);
       if (result.exploded && attempt === 0) {
         this.status = "lost";
+        this.quotaSearchable = false;
         return "lost";
       }
       if (
         !result.exploded &&
         this.hasProgress() &&
         this.pocketsFreshlyResolved(snap) &&
-        (deep ? this.playoutSurvives(tier.opening) : true)
+        (deep ? this.playoutSurvives(playoutTier(this.density).opening) : true)
       ) {
         this.lastRevealed = result.revealed;
         this.analysis = null;
+        this.lockFreshQuotas(snap);
+        this.quotaSearchable = false;
         return "ok";
       }
       this.rollbackAndReroll(snap);
@@ -267,7 +301,32 @@ export class Board {
     // chunks created, so the honest layout stands and the ambiguous cells
     // are reported for marking
     this.analysis = null;
-    return this.attemptReveal(cells).exploded ? this.lose() : "ok";
+    this.quotaSearchable = false;
+    const result = this.attemptReveal(cells);
+    this.lockFreshQuotas(snap);
+    return result.exploded ? this.lose() : "ok";
+  }
+
+  // why: freeze the quotas the accepted numbers were computed against, so
+  // no later re-roll can move a mine under a revealed count
+  private lockFreshQuotas(snap: Snapshot): void {
+    for (const chunkKey of this.committed) {
+      if (snap.committed.has(chunkKey) || this.chunkQuotas.has(chunkKey)) {
+        continue;
+      }
+      const [chunkX = 0, chunkY = 0] = chunkKey.split(",").map(Number);
+      this.chunkQuotas.set(
+        chunkKey,
+        blockQuota(
+          this.seed,
+          chunkX,
+          chunkY,
+          this.density,
+          this.nonces.get(chunkKey) ?? 0,
+          this.quotaSearchable,
+        ),
+      );
+    }
   }
 
   // why: the playout runs on the real board (cascade counts included), so

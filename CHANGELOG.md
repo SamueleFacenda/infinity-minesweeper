@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Mine placement is quota-modulated per chunk: each 16×16 chunk draws its own mine quota around the difficulty density (uniform noise in [-1, 1], frozen on first visibility), so the frontier alternates tractable and dense ground while the global mine fraction stays at the tier. Measured at Insane: the median deterministic chain grew from ~67 to beyond 1200 moves with the mine fraction at 34%; below Expert the distribution stays uniform because those tiers never stalled and their cascades are expensive
+- Mine quota spread is peaked (`sign(u) * u^2`) and floored at 60% of the nominal density: most chunks now sit at the tier density so the difficulty reads uniform and the board has no empty islands, while rare chunks still swing far enough to anchor long deterministic chains. Measured at Insane: median chain ~590 moves (67 before any modulation, 1200 at the cap with the flat spread), zero-cell cascades down from 31% to 12% of revealed tiles, mine fraction 34.9%
+- Mine placement is quota-modulated per chunk: each 16×16 chunk draws its own mine quota around the difficulty density (frozen on first visibility), so the frontier alternates tractable and dense ground while the global mine fraction stays at the tier; below Expert the distribution stays uniform because those tiers never stalled and their cascades are expensive
 - The opening reveal now searches over the quotas of its unrevealed chunks and freezes them with the first visible numbers, so a cramped first click can still open a playable game without any committed number ever changing
 - Opening playout depth is scaled by density (25 moves on easy up to 60 on insane) instead of a single deep requirement
 

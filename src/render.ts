@@ -166,6 +166,9 @@ export class Renderer {
   cameraY = 0;
   hintCell: Cell | null = null;
   hoverCell: Cell | null = null;
+  // why: hidden cells that deduction cannot resolve, set from the board's
+  // deduction state after every reveal
+  guessZone: ReadonlySet<string> = new Set();
 
   private readonly revealAnims = new Map<string, RevealAnimation>();
   // why: keyed by cell and corner, each entry holds the reveal animation
@@ -202,6 +205,7 @@ export class Renderer {
   setBoard(board: Board): void {
     this.board = board;
     this.hintCell = null;
+    this.guessZone = new Set();
     this.hoverCell = null;
     this.revealAnims.clear();
     this.cornerCollapses.clear();
@@ -474,6 +478,24 @@ export class Renderer {
     ) {
       this.drawHintGlow(sx, sy, this.cellSize);
     }
+    if (this.guessZone.has(key)) this.drawGuessMarker(sx, sy, cellW, cellH);
+  }
+
+  // why: a small centered dot reads as "pinned" without hiding the sheet
+  // color, so guess cells stay recognizable as still-hidden ground
+  private drawGuessMarker(sx: number, sy: number, w: number, h: number): void {
+    this.ctx.globalAlpha = 0.7;
+    this.ctx.fillStyle = canvasPalette().background;
+    this.ctx.beginPath();
+    this.ctx.arc(
+      sx + w / 2,
+      sy + h / 2,
+      Math.max(1, this.cellSize * 0.08),
+      0,
+      Math.PI * 2,
+    );
+    this.ctx.fill();
+    this.ctx.globalAlpha = 1;
   }
 
   private drawHoverOverlay(sx: number, sy: number): void {

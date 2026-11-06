@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { Board } from "../../src/game/board.js";
+import { keyOf } from "../../src/game/coords.js";
 import {
   DIFFICULTIES,
   FASTEST_TARGET_TILES,
+  difficultyById,
 } from "../../src/game/difficulty.js";
 
 function guidedSteps(density: number): number {
@@ -14,9 +16,13 @@ function guidedSteps(density: number): number {
 function playGuided(board: Board, steps: number): void {
   for (let step = 0; step < steps; step++) {
     const hint = board.findHint();
-    // why: the no-guess guarantee means a certain move always exists
-    expect(hint, "board stuck without a certain move").not.toBeNull();
-    if (hint === null) return;
+    if (hint === null) {
+      // why: the generator either keeps a certain move available or the
+      // board marks the ambiguous zone; a stuck board without a marking
+      // is the failure this guards against
+      expect(board.deductionState().guessCells.length).toBeGreaterThan(0);
+      return;
+    }
     expect(board.reveal(hint.x, hint.y)).toBe("ok");
     expect(board.status).toBe("playing");
   }
@@ -37,7 +43,9 @@ describe("board", () => {
       playGuided(board, guidedSteps(difficulty.density));
       expect(board.revealedCount).toBeGreaterThan(40);
     });
-  });
+    // why: the generator searches several candidates per reveal on the
+    // deep tiers, so the whole ladder costs more than a frame budget
+  }, 60_000);
 
   it("keeps the no-guess guarantee for many seeds", () => {
     for (let seed = 1; seed <= 5; seed++) {
@@ -61,6 +69,112 @@ describe("board", () => {
       }
     }
   });
+
+  it("opens every difficulty with terrain that survives the playout", () => {
+    // why: the opening playout depth of the hardest tier, enforced by the
+    // generator for every difficulty
+    const guaranteed = 50;
+    DIFFICULTIES.forEach((difficulty, index) => {
+      const board = new Board(0xfeed100 + index, difficulty.density);
+      board.reveal(0, 0);
+      for (let step = 0; step < guaranteed; step++) {
+        const hint = board.findHint();
+        expect(
+          hint,
+          `${difficulty.id} stalled at step ${String(step)}`,
+        ).not.toBeNull();
+        if (hint === null) return;
+        expect(board.reveal(hint.x, hint.y)).toBe("ok");
+      }
+      expect(board.revealedCount).toBeGreaterThan(guaranteed);
+    });
+  }, 30_000);
+
+  it("keeps a long deterministic chain on every tier", () => {
+    // why: the compensated ladder plus quota modulation keeps natural
+    // chains long on the easier tiers and the deep tiers deliberately
+    // shorter; the median moves before a marked zone are the contract
+    const floors: readonly (readonly [string, number, number])[] = [
+      ["expert", difficultyById("expert").density, 300],
+      ["evil", difficultyById("evil").density, 200],
+      ["insane", difficultyById("insane").density, 100],
+    ];
+    for (const [name, density, floor] of floors) {
+      const chains: number[] = [];
+      for (let seed = 1; seed <= 6; seed++) {
+        const board = new Board(seed * 7919 + 13, density);
+        board.reveal(0, 0);
+        let steps = 0;
+        for (; steps < 400; steps++) {
+          const hint = board.findHint();
+          if (hint === null) break;
+          expect(board.reveal(hint.x, hint.y)).toBe("ok");
+        }
+        chains.push(steps);
+        expect(board.status).toBe("playing");
+      }
+      chains.sort((a, b) => a - b);
+      const median = chains[3];
+      expect(
+        median,
+        `${name} median chain ${String(median)} below ${String(floor)}`,
+      ).toBeGreaterThanOrEqual(floor);
+    }
+  }, 300_000);
+
+  it("frees a safe cell from a guess zone and keeps the run going", () => {
+    // why: a player who refuses to guess must never be forced to end a
+    // run; the free cell is a real cell of the fixed layout, so opening
+    // it never explodes
+    let freed = 0;
+    for (let seed = 1; seed <= 2; seed++) {
+      const board = new Board(seed * 104729 + 600, 0.6);
+      board.reveal(0, 0);
+      for (let step = 0; step < 120; step++) {
+        const hint = board.findHint();
+        if (hint !== null) {
+          expect(board.reveal(hint.x, hint.y)).toBe("ok");
+          continue;
+        }
+        const cell = board.freeCell();
+        if (cell === null) break;
+        freed++;
+        expect(board.isMine(cell.x, cell.y)).toBe(false);
+        expect(board.status).toBe("playing");
+      }
+      expect(board.status).toBe("playing");
+    }
+    expect(freed).toBeGreaterThan(0);
+  }, 300_000);
+
+  it("refuses the free cell while a certain move exists", () => {
+    const board = new Board(42, 0.35);
+    board.reveal(0, 0);
+    expect(board.findHint()).not.toBeNull();
+    expect(board.freeCell()).toBeNull();
+    expect(board.revealedCount).toBeGreaterThan(0);
+  });
+
+  it("never opens cells the click did not reach", () => {
+    // why: the removed rescue-pin fallback revealed a disconnected
+    // mine-free patch as part of an unrelated click
+    for (const density of [0.22, 0.3, 0.35]) {
+      for (let seed = 1; seed <= 3; seed++) {
+        const board = new Board(seed * 104729 + density * 1000, density);
+        board.reveal(0, 0);
+        for (let step = 0; step < 40; step++) {
+          const hint = board.findHint();
+          if (hint === null) break;
+          board.reveal(hint.x, hint.y);
+          if (board.lastRevealed.length === 0) continue;
+          const reached = connectedCells(board, hint);
+          for (const [x, y] of board.lastRevealed) {
+            expect(reached.has(keyOf(x, y))).toBe(true);
+          }
+        }
+      }
+    }
+  }, 30_000);
 
   it("toggles flags on hidden cells only", () => {
     const board = new Board(1, 0.17);
@@ -158,6 +272,25 @@ function neighbors(x: number, y: number): [number, number][] {
     [x, y + 1],
     [x + 1, y + 1],
   ];
+}
+
+function connectedCells(
+  board: Board,
+  from: { x: number; y: number },
+): Set<string> {
+  const reached = new Set<string>([keyOf(from.x, from.y)]);
+  const queue: [number, number][] = [[from.x, from.y]];
+  while (queue.length > 0) {
+    const current = queue.pop();
+    if (current === undefined) break;
+    for (const [nx, ny] of neighbors(current[0], current[1])) {
+      const key = keyOf(nx, ny);
+      if (reached.has(key) || !board.isRevealed(nx, ny)) continue;
+      reached.add(key);
+      queue.push([nx, ny]);
+    }
+  }
+  return reached;
 }
 
 describe("run metrics", () => {

@@ -1,6 +1,7 @@
 import type { ClickResult } from "./game/board.js";
 import { Board } from "./game/board.js";
 import type { Cell } from "./game/coords.js";
+import { keyOf } from "./game/coords.js";
 import type { Difficulty } from "./game/difficulty.js";
 import {
   DIFFICULTIES,
@@ -28,7 +29,9 @@ interface Elements {
   flags: HTMLElement;
   cleared: HTMLElement;
   time: HTMLElement;
+  state: HTMLElement;
   hint: HTMLButtonElement;
+  free: HTMLButtonElement;
   leaderboard: HTMLButtonElement;
   newGame: HTMLButtonElement;
   theme: HTMLButtonElement;
@@ -43,6 +46,7 @@ interface Elements {
   modalClose: HTMLButtonElement;
   modalBoards: HTMLElement;
   toast: HTMLElement;
+  generating: HTMLElement;
 }
 
 class Game {
@@ -50,6 +54,8 @@ class Game {
   private readonly renderer: Renderer;
   private readonly leaderboard = new Leaderboard(window.localStorage);
   private timerStart: number | null = null;
+  // why: time the board spent generating, excluded from the run clock
+  private generationMs = 0;
   private fastestRecorded = false;
   private lastMilestone = 0;
   private dragStart: { x: number; y: number } | null = null;
@@ -173,6 +179,9 @@ class Game {
     });
     this.elements.hint.addEventListener("click", () => {
       this.onHint();
+    });
+    this.elements.free.addEventListener("click", () => {
+      this.onFreeCell();
     });
     this.elements.leaderboard.addEventListener("click", () => {
       this.showModal();
@@ -494,6 +503,10 @@ class Game {
       case "H":
         this.onHint();
         return;
+      case "f":
+      case "F":
+        this.onFreeCell();
+        return;
       case "n":
       case "N":
         this.restart();
@@ -504,13 +517,24 @@ class Game {
     this.renderer.requestDraw();
   }
 
-  private clickCell(cell: Cell): void {
-    if (this.board.status !== "playing") return;
+  // why: generating can take up to a second on the hardest tier, so the
+  // indicator paints first and the run clock stops while it runs
+  private async runReveal(cell: Cell): Promise<void> {
+    const started = Date.now();
+    this.elements.generating.classList.remove("hidden");
+    await nextAnimationFrame();
     const result = this.board.isRevealed(cell.x, cell.y)
       ? this.board.clickNumber(cell.x, cell.y)
       : this.board.reveal(cell.x, cell.y);
+    this.generationMs += Date.now() - started;
+    this.elements.generating.classList.add("hidden");
     this.renderer.hintCell = null;
     this.applyResult(result, cell);
+  }
+
+  private clickCell(cell: Cell): void {
+    if (this.board.status !== "playing") return;
+    void this.runReveal(cell);
   }
 
   private applyResult(result: ClickResult, origin: Cell): void {
@@ -555,7 +579,10 @@ class Game {
 
   private elapsedSeconds(): number {
     if (this.timerStart === null) return 0;
-    return Math.floor((Date.now() - this.timerStart) / 1000);
+    // why: generation time is the computer's, not the player's, so the
+    // fastest-run record measures play time only
+    const played = Date.now() - this.timerStart - this.generationMs;
+    return Math.max(0, Math.floor(played / 1000));
   }
 
   // ponytail: biggest is checkpointed every 100 tiles instead of every
@@ -591,12 +618,44 @@ class Game {
       this.showToast(
         this.board.revealedCount === 0
           ? "Open anywhere to start - the first click is always safe"
-          : "No certain move is available - this should not happen, start a new game (N)",
+          : "No certain move - open a Free cell (F) or guess in the marked zone",
       );
       return;
     }
     this.renderer.hintCell = hint;
     this.renderer.draw();
+  }
+
+  private onFreeCell(): void {
+    if (this.board.status !== "playing") return;
+    // why: the free cell also waits for the reveal search, so it shows the
+    // indicator like any other reveal
+    void this.runFreeCell();
+  }
+
+  private async runFreeCell(): Promise<void> {
+    const started = Date.now();
+    this.elements.generating.classList.remove("hidden");
+    await nextAnimationFrame();
+    const cell = this.board.freeCell();
+    this.generationMs += Date.now() - started;
+    this.elements.generating.classList.add("hidden");
+    if (cell === null) {
+      this.showToast(this.freeCellRefusal());
+      return;
+    }
+    this.renderer.hintCell = null;
+    this.applyResult("ok", cell);
+  }
+
+  private freeCellRefusal(): string {
+    if (this.board.revealedCount === 0) {
+      return "Open anywhere to start - the first click is always safe";
+    }
+    if (this.board.deductionState().certainMove) {
+      return "A certain move exists - the free cell is only for guess zones";
+    }
+    return "No safe cell in the marked zone - start a new game (N)";
   }
 
   private onDifficultyChange(): void {
@@ -613,6 +672,7 @@ class Game {
     this.renderer.setBoard(this.board);
     this.renderer.centerOn({ x: 0, y: 0 });
     this.timerStart = null;
+    this.generationMs = 0;
     this.fastestRecorded = false;
     this.lastMilestone = 0;
     this.hideOverlay();
@@ -692,7 +752,24 @@ class Game {
   private updateStats(): void {
     this.elements.flags.textContent = `Flags ${String(this.board.flaggedCount)}`;
     this.elements.cleared.textContent = `Cleared ${String(this.board.revealedCount)}`;
+    this.updateGuessZone();
     this.updateTime();
+  }
+
+  // why: the board reports hidden cells that stay ambiguous after
+  // deduction; the zone is empty whenever a certain move exists
+  private updateGuessZone(): void {
+    const state = this.board.deductionState();
+    this.renderer.guessZone = new Set(
+      state.guessCells.map((cell) => keyOf(cell.x, cell.y)),
+    );
+    if (state.certainMove) {
+      this.elements.state.textContent = "";
+      this.elements.state.classList.add("hidden");
+      return;
+    }
+    this.elements.state.textContent = `Guess zone ${String(state.guessCells.length)} cells`;
+    this.elements.state.classList.remove("hidden");
   }
 
   private updateTime(): void {
@@ -718,6 +795,14 @@ function shortDate(iso: string): string {
   return iso.slice(0, 10);
 }
 
+function nextAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      resolve();
+    });
+  });
+}
+
 function requireElement<T extends HTMLElement>(
   id: string,
   kind: abstract new () => T,
@@ -735,7 +820,9 @@ const elements: Elements = {
   flags: requireElement("stat-flags", HTMLElement),
   cleared: requireElement("stat-cleared", HTMLElement),
   time: requireElement("stat-time", HTMLElement),
+  state: requireElement("stat-state", HTMLElement),
   hint: requireElement("btn-hint", HTMLButtonElement),
+  free: requireElement("btn-free", HTMLButtonElement),
   leaderboard: requireElement("btn-leaderboard", HTMLButtonElement),
   newGame: requireElement("btn-new", HTMLButtonElement),
   theme: requireElement("btn-theme", HTMLButtonElement),
@@ -750,6 +837,7 @@ const elements: Elements = {
   modalClose: requireElement("modal-close", HTMLButtonElement),
   modalBoards: requireElement("modal-boards", HTMLElement),
   toast: requireElement("toast", HTMLElement),
+  generating: requireElement("generating", HTMLElement),
 };
 
 new Game(elements, difficultyById("medium"));

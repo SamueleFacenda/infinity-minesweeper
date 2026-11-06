@@ -18,6 +18,7 @@
         <span id="stat-flags">Flags 0</span>
         <span id="stat-cleared">Cleared 0</span>
         <span id="stat-time">0:00</span>
+        <span id="stat-state" class="hidden"></span>
       </div>
       <div class="hud-theme" role="group" aria-label="Appearance">
         <div id="accent-dots" class="accent-dots"></div>
@@ -33,6 +34,13 @@
           Flag first
         </button>
         <button id="btn-hint" type="button">Hint</button>
+        <button
+          id="btn-free"
+          type="button"
+          title="Open one safe cell of the marked guess zone (only when no certain move exists)"
+        >
+          Free cell
+        </button>
         <button id="btn-leaderboard" type="button">Leaderboard</button>
         <button id="btn-new" type="button" class="primary">New game</button>
       </div>
@@ -41,6 +49,9 @@
       <canvas id="board-canvas"></canvas>
     </main>
     <div id="toast" class="toast hidden"></div>
+    <div id="generating" class="generating hidden" role="status">
+      Generating board…
+    </div>
     <div id="overlay" class="overlay hidden">
       <div class="overlay-card">
         <h2 id="overlay-title"></h2>

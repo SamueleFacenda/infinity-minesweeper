@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Per-tier generation budgets with a best-of-N reveal search: each reveal re-rolls fresh chunks inside its tier's budget and keeps the candidate whose deterministic chain runs deepest, instead of the first acceptable one (Easy stays first-fit, it never stalled)
+- Loading UX for generation: a "Generating board..." indicator paints before the search runs (up to ~1s on Insane) and the fastest-run clock excludes generation time
+
 ### Added
+
+- Free cell action (`F` or the Free cell button): when no certain move exists, opens one guaranteed-safe cell of the marked guess zone - a real cell of the fixed layout, so a run never has to end in a guess
+
+### Changed
+
+- Mine quota spread is peaked (`sign(u) * u^2`) and floored at 60% of the nominal density: most chunks now sit at the tier density so the difficulty reads uniform and the board has no empty islands, while rare chunks still swing far enough to anchor long deterministic chains. Measured at Insane: median chain ~590 moves (67 before any modulation, 1200 at the cap with the flat spread), zero-cell cascades down from 31% to 12% of revealed tiles, mine fraction 34.9%
+- Mine placement is quota-modulated per chunk: each 16×16 chunk draws its own mine quota around the difficulty density (frozen on first visibility), so the frontier alternates tractable and dense ground while the global mine fraction stays at the tier; below Expert the distribution stays uniform because those tiers never stalled and their cascades are expensive
+- The opening reveal now searches over the quotas of its unrevealed chunks and freezes them with the first visible numbers, so a cramped first click can still open a playable game without any committed number ever changing
+- Opening playout depth is scaled by density (25 moves on easy up to 60 on insane) instead of a single deep requirement
+
+- No-guess engine rewritten: the solver propagates per-cell mine bounds across the whole frontier and enumerates small unresolved components exactly, so hints prove cells safe that the old single-point and subset passes could not reach
+- Removed the forced-opening fallback that pinned mine-free 3x3 areas and revealed them as part of an unrelated click; a reveal now only ever opens the cells it reaches
+- Fixed re-rolls being no-ops after the first attempt (chunk nonces were restored instead of incremented), so the generator actually explores a different layout per attempt
+- New per-reveal guarantees: a certain move must exist and every enclosed pocket the reveal created must be fully deducible
+- Every game now opens on terrain that survives a deterministic playout whose depth scales with difficulty, so no game stalls a few moves in
+- Stuck states are honest now: when no re-roll can rescue a position the ambiguous cells are reported and marked, the HUD shows the guess-zone size, those cells carry a dot on the hidden sheet, and the Hint message no longer claims the state is impossible
 
 - Infinite minesweeper webapp: hash-based infinite board, no-guess generation with lazy chunk re-rolling, hint, chording, auto-fill, canvas renderer, local leaderboard (biggest/fastest)
 - Nix static site package (`nix build .#site`) built with nixpkgs tsc, no bundler

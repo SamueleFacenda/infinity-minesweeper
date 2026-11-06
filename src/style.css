@@ -71,6 +71,11 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+#stat-state {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .hud-theme {
   display: flex;
   align-items: center;
@@ -194,6 +199,26 @@ main {
 
 .toast:not(.hidden) {
   animation: toast-in 200ms ease-out;
+}
+
+.generating {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 0.75rem 1.25rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--accent);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.4);
+  pointer-events: none;
+}
+
+.generating:not(.hidden) {
+  animation: toast-in 150ms ease-out;
 }
 
 .overlay,

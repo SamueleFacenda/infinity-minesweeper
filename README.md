@@ -4,8 +4,10 @@
 
 An endless minesweeper board generated lazily and deterministically from a
 seed, verified by a constraint solver after every reveal: a logical next
-move always exists. Modern flat design, one-click chording, six difficulty
-tiers up to a brutal 35% mine density, and a local leaderboard.
+move always exists, and when one genuinely cannot, the board says so and
+marks the zone instead of guessing for you. Modern flat design, one-click
+chording, six difficulty tiers up to a brutal 35% mine density, and a
+local leaderboard.
 
 ![Gameplay screenshot](docs/screenshot.png)
 
@@ -14,13 +16,15 @@ tiers up to a brutal 35% mine density, and a local leaderboard.
 - **Infinite board** - the grid extends without limit in every direction;
   mine placement is a pure hash function of seed and coordinates, so
   nothing is stored until you explore it
-- **No guessing, ever** - after every reveal a constraint solver
-  (single-point rules, subset rules, bounded component enumeration)
-  verifies that a certain move exists; if the freshly generated terrain
-  would dead-end, the generator re-rolls it or carves a guaranteed-safe
-  opening nearby
+- **No guessing** - after every reveal the solver verifies that a certain
+  move exists and that no enclosed pocket of hidden cells is
+  unresolvable; terrain that would dead-end is re-rolled, and the rare
+  positions no re-roll can rescue are marked as guess zones instead of
+  hidden or resolved by force
 - **Deterministic solving aids** - a Hint button (or `H`) highlights a
-  cell that is provably safe right now
+  cell that is provably safe right now, and a Free cell button (or `F`)
+  opens one guaranteed-safe cell of a marked guess zone, so a run never
+  has to end in a guess
 - **Fast controls** - click a satisfied number to chord (auto-disclose
   neighbors), click a number whose remaining unknowns are all mines to
   auto-fill flags; drag to pan, wheel to zoom
@@ -37,6 +41,7 @@ tiers up to a brutal 35% mine density, and a local leaderboard.
 | Flag / unflag     | Right click                     |
 | Chord / auto-fill | Left click on a revealed number |
 | Hint              | `H` or the Hint button          |
+| Free cell         | `F` or the Free cell button     |
 | Pan               | Drag, or arrow keys             |
 | Zoom              | Mouse wheel                     |
 | New game          | `N` or the New game button      |
@@ -63,15 +68,50 @@ minesweeper.online's (see References).
 
 1. A cell's mine status is a hash of `(seed, chunk nonce, x, y)` - the
    infinite board is fully defined yet stored nowhere.
-2. Chunks (16×16) become **committed** (nonce frozen) once they are visible
+2. Every chunk draws its own mine quota around the difficulty density
+   (`density * (1 + spread)`, `spread = sign(u) * u^2` for uniform `u` in
+   [-1, 1], floored at 60% of the density), so the board still alternates
+   ground deduction can chew through and ground that stays dense while
+   the global mine fraction stays at the difficulty level. A uniform
+   frontier at Insane density is ambiguous within a handful of moves;
+   the peaked spread keeps most chunks at the nominal density - the
+   difficulty reads uniform - while only rare chunks swing far enough to
+   anchor a chain, and the floor leaves no empty islands to walk through.
+   Quotas stay uniform below Expert, because those tiers never stalled
+   and their cascades are expensive.
+3. Chunks (16×16) become **committed** (nonce frozen) once they are visible
    to the player; before commitment the generator may re-roll them
-   invisibly.
-3. Every reveal plays out tentatively; the solver then checks that the
-   visible position contains at least one provably safe cell. If not, the
-   freshly committed chunks are re-rolled, and if the reveal would
-   dead-end inside a dense mine wall, a guaranteed-safe opening is pinned
-   into fresh terrain within a few cells of your click.
-4. Hint runs the same solver and highlights its next certain move.
+   invisibly. A chunk's quota freezes with its first visible number, so
+   no settled region ever changes density; only the opening reveal
+   searches over the quotas of its still-unrevealed chunks, and whatever
+   it picks is frozen the moment the numbers are shown.
+4. Every reveal plays out tentatively: fresh chunks are re-rolled inside a
+   budget scaled by difficulty, and the candidate whose deterministic
+   chain runs deepest wins. Harder tiers get bigger budgets and deeper
+   opening guarantees; the light tiers stay first-fit because they never
+   stalled. Generation can take up to about a second on Insane, so a
+   "Generating board..." indicator paints first and the run clock stops
+   while it runs.
+5. Every reveal plays out tentatively; the solver then checks that the
+   visible position contains at least one provably safe cell and that
+   every enclosed pocket the reveal created is fully deducible. If either
+   check fails, the freshly committed chunks are re-rolled.
+6. The opening click also requires a deterministic playout scaled by
+   density (25 to 60 moves), so every game starts on terrain that stays
+   solvable well past the first moves.
+7. When re-rolling cannot repair ambiguity that already-committed terrain
+   created, the honest layout stands and the ambiguous cells are
+   **marked**: the HUD shows "Guess zone: N cells", those cells carry a
+   dot on the sheet. You then have two honest options - open one Free
+   cell (a real cell of the fixed layout that the board knows is not a
+   mine) or take your chances guessing. The board never guesses for you
+   and never opens cells you did not click.
+8. Hint runs the same solver and highlights its next certain move.
+
+The solver propagates per-cell mine bounds (lower and upper) across the
+whole frontier until they stop tightening, then enumerates small
+unresolved components exactly - so beyond the basic rules it also proves
+cells safe that single-point and subset reasoning alone cannot reach.
 
 ## Build and run
 

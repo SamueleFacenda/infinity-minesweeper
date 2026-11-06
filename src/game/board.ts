@@ -7,7 +7,6 @@ import {
   parseKey,
 } from "./coords.js";
 import { enclosedRegions } from "./regions.js";
-import type { EnclosedRegion } from "./regions.js";
 import { blockQuota, cellHash } from "./rng.js";
 import { findSafeCell, solve } from "./solver.js";
 
@@ -19,32 +18,110 @@ export interface DeductionState {
   readonly guessCells: readonly Cell[];
 }
 
-const MAX_ROLLS = 32;
-// why: an opening - the first click or a deliberate new area - must
-// survive a deep deterministic playout, because there the whole chain of
-// certain moves is still unconstrained and re-rolls can enforce it.
-// Deeper tiers survive longer closure playouts, so the depths scale with
-// density
-// why: the modulated quota already produces long natural chains, so the
-// opening only needs a modest guarantee; deeper playouts cost more per
-// attempt than they add in certainty, and low densities pay the most per
-// attempt because their cascades grow the frontier fast
-const PLAYOUT_TIERS: readonly {
-  readonly maxDensity: number;
+// Generation effort per tier. Every reveal re-rolls fresh chunks until
+// the checks pass, and the search keeps the candidate whose deterministic
+// chain runs deepest instead of the first acceptable one, so harder tiers
+// buy longer runs with the generation budget.
+interface GenerationProfile {
+  // why: an opening must survive a deep deterministic playout, because
+  // there the whole chain is still unconstrained and re-rolls can enforce
+  // it
   readonly opening: number;
+  // why: a candidate that merely reaches one certain move can still walk
+  // into a wall; the best-of search prefers the deepest chain it can find
+  readonly select: number;
+  // why: zero cells open ground by a trivial rule, which is what makes a
+  // tier read as easy; the cap tightens as the difficulty rises
+  readonly zeroCap: number;
+  readonly candidates: number;
+  readonly budgetMs: number;
+}
+
+const GENERATION_PROFILES: readonly {
+  readonly maxDensity: number;
+  readonly profile: GenerationProfile;
 }[] = [
-  { maxDensity: 0.23, opening: 25 },
-  { maxDensity: 0.28, opening: 40 },
-  { maxDensity: 0.33, opening: 50 },
-  { maxDensity: Number.POSITIVE_INFINITY, opening: 60 },
+  {
+    maxDensity: 0.15,
+    profile: {
+      opening: 25,
+      select: 15,
+      zeroCap: 1,
+      candidates: 24,
+      budgetMs: 50,
+    },
+  },
+  {
+    maxDensity: 0.19,
+    profile: {
+      opening: 25,
+      select: 0,
+      zeroCap: 1,
+      candidates: 12,
+      budgetMs: 40,
+    },
+  },
+  {
+    maxDensity: 0.27,
+    profile: {
+      opening: 30,
+      select: 0,
+      zeroCap: 1,
+      candidates: 16,
+      budgetMs: 60,
+    },
+  },
+  {
+    maxDensity: 0.32,
+    profile: {
+      opening: 50,
+      select: 25,
+      zeroCap: 1,
+      candidates: 48,
+      budgetMs: 250,
+    },
+  },
+  {
+    maxDensity: 0.37,
+    profile: {
+      opening: 55,
+      select: 25,
+      zeroCap: 1,
+      candidates: 64,
+      budgetMs: 400,
+    },
+  },
+  {
+    maxDensity: Number.POSITIVE_INFINITY,
+    profile: {
+      opening: 60,
+      select: 30,
+      zeroCap: 1,
+      candidates: 96,
+      budgetMs: 900,
+    },
+  },
 ];
 
-function playoutTier(density: number): { opening: number } {
-  const tier = PLAYOUT_TIERS.find(
+function generationProfile(density: number): GenerationProfile {
+  const tier = GENERATION_PROFILES.find(
     (candidate) => density <= candidate.maxDensity,
   );
-  return tier ?? { opening: 0 };
+  return tier?.profile ?? EASIEST_PROFILE;
 }
+
+const EASIEST_PROFILE: GenerationProfile = {
+  opening: 25,
+  select: 15,
+  zeroCap: 1,
+  candidates: 24,
+  budgetMs: 50,
+};
+
+// why: the pocket closure floods and solves the whole board, so a reveal
+// only pays for a bounded number of them; a candidate is never accepted
+// without passing the check
+const MAX_POCKET_CHECKS = 3;
 
 const AREA_OFFSETS: readonly (readonly [number, number])[] = [
   [-1, -1],
@@ -274,9 +351,18 @@ export class Board {
     deep: boolean,
   ): ClickResult {
     const opening = this.revealedMap.size === 0;
+    const profile = generationProfile(this.density);
     this.quotaSearchable = opening;
     const snap = this.snapshot();
-    for (let attempt = 0; attempt < MAX_ROLLS; attempt++) {
+    const deadline = Date.now() + profile.budgetMs;
+    let fastPathTried = false;
+    let pocketChecks = 0;
+    let best: {
+      readonly snap: Snapshot;
+      readonly revealed: [number, number][];
+      readonly score: number;
+    } | null = null;
+    for (let attempt = 0; attempt < profile.candidates; attempt++) {
       const result = this.attemptReveal(cells);
       if (result.exploded && attempt === 0) {
         this.status = "lost";
@@ -286,16 +372,53 @@ export class Board {
       if (
         !result.exploded &&
         this.hasProgress() &&
-        this.pocketsFreshlyResolved(snap) &&
-        (deep ? this.playoutSurvives(playoutTier(this.density).opening) : true)
+        this.withinZeroCap(profile, result.revealed)
       ) {
-        this.lastRevealed = result.revealed;
-        this.analysis = null;
-        this.lockFreshQuotas(snap);
-        this.quotaSearchable = false;
-        return "ok";
+        const depth = this.playoutDepth(
+          deep ? profile.opening : profile.select,
+        );
+        const required = deep ? profile.opening : profile.select;
+        const reaches = depth >= required;
+        const improves = best === null || depth > best.score;
+        // why: the pocket closure floods and solves the whole board, so it
+        // runs at most once for the fast path and then only for a
+        // candidate that beats the best depth, not for every candidate
+        const worthChecking = (reaches && !fastPathTried) || improves;
+        if (worthChecking && this.pocketsResolved()) {
+          if (reaches) {
+            this.lastRevealed = result.revealed;
+            this.analysis = null;
+            this.lockFreshQuotas(snap);
+            this.quotaSearchable = false;
+            return "ok";
+          }
+          best = {
+            snap: this.snapshot(true),
+            revealed: result.revealed,
+            score: depth,
+          };
+        }
+        // why: only a checked candidate can be accepted, so capping the
+        // checks per reveal bounds the cost without weakening the
+        // guarantee; the search simply stops finding better candidates
+        if ((reaches && !fastPathTried) || improves) {
+          if (reaches) fastPathTried = true;
+          if (++pocketChecks >= MAX_POCKET_CHECKS) break;
+        }
       }
       this.rollbackAndReroll(snap);
+      if (Date.now() > deadline) break;
+    }
+    if (best !== null) {
+      this.restore(best.snap, true);
+      this.lastRevealed = best.revealed;
+      this.analysis = null;
+      // why: the candidate's counts were computed while the quotas were
+      // still searchable, so they freeze under the same value before the
+      // flag clears
+      this.lockFreshQuotas(snap);
+      this.quotaSearchable = false;
+      return "ok";
     }
     // why: re-rolling cannot repair an ambiguity that old committed
     // chunks created, so the honest layout stands and the ambiguous cells
@@ -307,8 +430,39 @@ export class Board {
     return result.exploded ? this.lose() : "ok";
   }
 
+  // why: one solve answers every pocket at once, because a pocket's
+  // constraint set is exactly the revealed cells touching it
+  private pocketsResolved(): boolean {
+    const pockets = enclosedRegions(this.revealedMap);
+    if (pockets.length === 0) return true;
+    const { safe, mines } = solve(this.revealedMap);
+    return pockets.every((pocket) =>
+      pocket.bordered.every((cell) => safe.has(cell) || mines.has(cell)),
+    );
+  }
+
+  // why: a batch dense with zero cells opens ground by the trivial rule,
+  // which is what makes a tier read as easy; the cap tightens with
+  // difficulty so the harder tiers force deduction from the first move
+  private withinZeroCap(
+    profile: GenerationProfile,
+    revealed: readonly [number, number][],
+  ): boolean {
+    if (profile.zeroCap >= 1 || revealed.length === 0) return true;
+    let zeros = 0;
+    for (const [x, y] of revealed) {
+      if ((this.revealedMap.get(keyOf(x, y)) ?? -1) === 0) zeros++;
+    }
+    return zeros / revealed.length <= profile.zeroCap;
+  }
+
   // why: freeze the quotas the accepted numbers were computed against, so
-  // no later re-roll can move a mine under a revealed count
+  // no later re-roll can move a mine under a revealed count; only cells
+  // around the new reveal can change, so the walk stays local
+  // why: freeze the quotas the accepted numbers were computed against, so
+  // no later re-roll can move a mine under a revealed count; a chunk is
+  // keyed as a whole because its cells were all evaluated against one
+  // quota
   private lockFreshQuotas(snap: Snapshot): void {
     for (const chunkKey of this.committed) {
       if (snap.committed.has(chunkKey) || this.chunkQuotas.has(chunkKey)) {
@@ -332,12 +486,20 @@ export class Board {
   // why: the playout runs on the real board (cascade counts included), so
   // its mutated state is discarded by restoring the snapshot it started
   // from, and lastRevealed is restored by the caller
-  private playoutSurvives(depth: number): boolean {
-    if (depth === 0) return true;
-    const before = this.snapshot();
-    const survives = this.playoutSolvable(depth);
-    this.restore(before);
-    return survives;
+  // why: the playout runs on the real board (cascade counts included), so
+  // its mutated state is discarded by restoring the snapshot it started
+  // from; the reached depth is the fitness the search ranks candidates by
+  private playoutDepth(depth: number): number {
+    const before = this.snapshot(true);
+    let reached = 0;
+    for (; reached < depth; reached++) {
+      const hint = findSafeCell(this.revealedMap);
+      if (hint === null) break;
+      const { x, y } = parseKey(hint);
+      if (this.attemptReveal([[x, y]]).exploded) break;
+    }
+    this.restore(before, true);
+    return reached;
   }
 
   private playoutSolvable(depth: number): boolean {
@@ -391,38 +553,10 @@ export class Board {
   // why: a pocket whose ambiguous cells all sit in chunks the re-roll
   // cannot touch is permanently ambiguous; re-rolling only the fresh
   // chunks repairs what this reveal's own terrain created
-  private pocketsFreshlyResolved(snap: Snapshot): boolean {
-    const fresh = new Set<string>();
-    for (const chunkKey of this.committed) {
-      if (!snap.committed.has(chunkKey)) fresh.add(chunkKey);
-    }
-    if (fresh.size === 0) return true;
-    return enclosedRegions(this.revealedMap).every((pocket) =>
-      pocket.bordered.every((cell) => {
-        const { x, y } = parseKey(cell);
-        return fresh.has(chunkKeyOf(x, y));
-      })
-        ? this.pocketDeducible(pocket)
-        : true,
-    );
-  }
 
   // why: a pocket's constraints come only from the revealed cells touching
   // it, so solving that local view decides the pocket without running the
   // whole-board solver
-  private pocketDeducible(pocket: EnclosedRegion): boolean {
-    const local = new Map<string, number>();
-    for (const cell of pocket.bordered) {
-      const { x, y } = parseKey(cell);
-      for (const [nx, ny] of neighborCoords(x, y)) {
-        const key = keyOf(nx, ny);
-        const count = this.revealedMap.get(key);
-        if (count !== undefined) local.set(key, count);
-      }
-    }
-    const { safe, mines } = solve(local);
-    return pocket.bordered.every((cell) => safe.has(cell) || mines.has(cell));
-  }
 
   private ambiguousCells(
     safe: ReadonlySet<string>,
@@ -455,19 +589,26 @@ export class Board {
     }
   }
 
-  private snapshot(): Snapshot {
+  private snapshot(withNonces = false): Snapshot {
     return {
       revealed: new Map(this.revealedMap),
       committed: new Set(this.committed),
       pinnedSafe: new Set(this.pinnedSafe),
+      nonces: withNonces ? new Map(this.nonces) : null,
     };
   }
 
-  private restore(snap: Snapshot): void {
+  private restore(snap: Snapshot, restoreNonces = false): void {
     this.revealedMap.clear();
     for (const [key, count] of snap.revealed) this.revealedMap.set(key, count);
     this.committed = new Set(snap.committed);
     this.pinnedSafe = new Set(snap.pinnedSafe);
+    // why: rollbacks keep the nonces so each re-roll explores a new
+    // layout, but replaying a chosen candidate must restore them too or
+    // its mines would move under the numbers it displayed
+    if (restoreNonces && snap.nonces !== null) {
+      this.nonces = new Map(snap.nonces);
+    }
   }
 }
 
@@ -475,4 +616,5 @@ interface Snapshot {
   revealed: Map<string, number>;
   committed: Set<string>;
   pinnedSafe: Set<string>;
+  nonces: Map<string, number> | null;
 }

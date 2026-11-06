@@ -26,11 +26,27 @@ const QUOTA_AMPLITUDE = 1;
 // islands and half walls, which read as a grid and tripled the cascades.
 // The floor keeps every chunk above this fraction of the nominal density,
 // so no empty islands remain to walk through
-const QUOTA_FLOOR_RATIO = 0.6;
-// why: easy tiers never stalled and their cascades grow the frontier fast,
-// so modulating them only costs per-step time; the deep tiers are where a
-// uniform frontier turns ambiguous within a few moves
-const QUOTA_FLOOR_DENSITY = 0.26;
+// why: the floor tightens with difficulty, so the hardest tiers keep no
+// sparse stretches at all while the easy ones keep their cascades; a floor
+// of one leaves the quota uniform for tiers that never stalled
+const QUOTA_FLOORS: readonly {
+  readonly maxDensity: number;
+  readonly floor: number;
+}[] = [
+  { maxDensity: 0.15, floor: 1 },
+  { maxDensity: 0.19, floor: 1 },
+  { maxDensity: 0.27, floor: 1 },
+  { maxDensity: 0.32, floor: 0.8 },
+  { maxDensity: 0.37, floor: 0.85 },
+  { maxDensity: Number.POSITIVE_INFINITY, floor: 0.9 },
+];
+
+export function quotaFloorFor(density: number): number {
+  const tier = QUOTA_FLOORS.find(
+    (candidate) => density <= candidate.maxDensity,
+  );
+  return tier?.floor ?? 1;
+}
 
 // A chunk's quota is a pure function of (seed, chunk), so the mine
 // fraction of a settled region always matches the difficulty. Only the
@@ -44,6 +60,7 @@ export function blockQuota(
   density: number,
   nonce: number,
   searchable: boolean,
+  floorRatio: number = quotaFloorFor(density),
 ): number {
   const noise = fmix32(
     Math.imul(chunkX, 0x9e3779b1) ^
@@ -51,11 +68,11 @@ export function blockQuota(
       Math.imul(seed, 0xc2b2ae35) ^
       (searchable ? Math.imul(nonce + 1, 0x27d4eb2f) : 0),
   );
-  if (density < QUOTA_FLOOR_DENSITY) return density;
+  if (floorRatio >= 1) return density;
   const flat = (noise / 4294967296) * 2 - 1;
   const spread = Math.sign(flat) * flat * flat;
   const quota = density * (1 + QUOTA_AMPLITUDE * spread);
-  const low = density * QUOTA_FLOOR_RATIO;
+  const low = density * floorRatio;
   return Math.min(0.9, Math.max(low, quota));
 }
 

@@ -46,6 +46,7 @@ interface Elements {
   modalClose: HTMLButtonElement;
   modalBoards: HTMLElement;
   toast: HTMLElement;
+  generating: HTMLElement;
 }
 
 class Game {
@@ -53,6 +54,8 @@ class Game {
   private readonly renderer: Renderer;
   private readonly leaderboard = new Leaderboard(window.localStorage);
   private timerStart: number | null = null;
+  // why: time the board spent generating, excluded from the run clock
+  private generationMs = 0;
   private fastestRecorded = false;
   private lastMilestone = 0;
   private dragStart: { x: number; y: number } | null = null;
@@ -514,13 +517,24 @@ class Game {
     this.renderer.requestDraw();
   }
 
-  private clickCell(cell: Cell): void {
-    if (this.board.status !== "playing") return;
+  // why: generating can take up to a second on the hardest tier, so the
+  // indicator paints first and the run clock stops while it runs
+  private async runReveal(cell: Cell): Promise<void> {
+    const started = Date.now();
+    this.elements.generating.classList.remove("hidden");
+    await nextAnimationFrame();
     const result = this.board.isRevealed(cell.x, cell.y)
       ? this.board.clickNumber(cell.x, cell.y)
       : this.board.reveal(cell.x, cell.y);
+    this.generationMs += Date.now() - started;
+    this.elements.generating.classList.add("hidden");
     this.renderer.hintCell = null;
     this.applyResult(result, cell);
+  }
+
+  private clickCell(cell: Cell): void {
+    if (this.board.status !== "playing") return;
+    void this.runReveal(cell);
   }
 
   private applyResult(result: ClickResult, origin: Cell): void {
@@ -565,7 +579,10 @@ class Game {
 
   private elapsedSeconds(): number {
     if (this.timerStart === null) return 0;
-    return Math.floor((Date.now() - this.timerStart) / 1000);
+    // why: generation time is the computer's, not the player's, so the
+    // fastest-run record measures play time only
+    const played = Date.now() - this.timerStart - this.generationMs;
+    return Math.max(0, Math.floor(played / 1000));
   }
 
   // ponytail: biggest is checkpointed every 100 tiles instead of every
@@ -611,7 +628,18 @@ class Game {
 
   private onFreeCell(): void {
     if (this.board.status !== "playing") return;
+    // why: the free cell also waits for the reveal search, so it shows the
+    // indicator like any other reveal
+    void this.runFreeCell();
+  }
+
+  private async runFreeCell(): Promise<void> {
+    const started = Date.now();
+    this.elements.generating.classList.remove("hidden");
+    await nextAnimationFrame();
     const cell = this.board.freeCell();
+    this.generationMs += Date.now() - started;
+    this.elements.generating.classList.add("hidden");
     if (cell === null) {
       this.showToast(this.freeCellRefusal());
       return;
@@ -644,6 +672,7 @@ class Game {
     this.renderer.setBoard(this.board);
     this.renderer.centerOn({ x: 0, y: 0 });
     this.timerStart = null;
+    this.generationMs = 0;
     this.fastestRecorded = false;
     this.lastMilestone = 0;
     this.hideOverlay();
@@ -766,6 +795,14 @@ function shortDate(iso: string): string {
   return iso.slice(0, 10);
 }
 
+function nextAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      resolve();
+    });
+  });
+}
+
 function requireElement<T extends HTMLElement>(
   id: string,
   kind: abstract new () => T,
@@ -800,6 +837,7 @@ const elements: Elements = {
   modalClose: requireElement("modal-close", HTMLButtonElement),
   modalBoards: requireElement("modal-boards", HTMLElement),
   toast: requireElement("toast", HTMLElement),
+  generating: requireElement("generating", HTMLElement),
 };
 
 new Game(elements, difficultyById("medium"));

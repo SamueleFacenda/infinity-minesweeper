@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Per-tier generation budgets with a best-of-N reveal search: each reveal re-rolls fresh chunks inside its tier's budget and keeps the candidate whose deterministic chain runs deepest, instead of the first acceptable one (Easy stays first-fit, it never stalled)
+- Loading UX for generation: a "Generating board..." indicator paints before the search runs (up to ~1s on Insane) and the fastest-run clock excludes generation time
+
 ### Added
 
 - Free cell action (`F` or the Free cell button): when no certain move exists, opens one guaranteed-safe cell of the marked guess zone - a real cell of the fixed layout, so a run never has to end in a guess

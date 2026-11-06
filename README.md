@@ -85,21 +85,28 @@ minesweeper.online's (see References).
    no settled region ever changes density; only the opening reveal
    searches over the quotas of its still-unrevealed chunks, and whatever
    it picks is frozen the moment the numbers are shown.
-4. Every reveal plays out tentatively; the solver then checks that the
+4. Every reveal plays out tentatively: fresh chunks are re-rolled inside a
+   budget scaled by difficulty, and the candidate whose deterministic
+   chain runs deepest wins. Harder tiers get bigger budgets and deeper
+   opening guarantees; the light tiers stay first-fit because they never
+   stalled. Generation can take up to about a second on Insane, so a
+   "Generating board..." indicator paints first and the run clock stops
+   while it runs.
+5. Every reveal plays out tentatively; the solver then checks that the
    visible position contains at least one provably safe cell and that
    every enclosed pocket the reveal created is fully deducible. If either
    check fails, the freshly committed chunks are re-rolled.
-5. The opening click also requires a deterministic playout scaled by
+6. The opening click also requires a deterministic playout scaled by
    density (25 to 60 moves), so every game starts on terrain that stays
    solvable well past the first moves.
-6. When re-rolling cannot repair ambiguity that already-committed terrain
+7. When re-rolling cannot repair ambiguity that already-committed terrain
    created, the honest layout stands and the ambiguous cells are
    **marked**: the HUD shows "Guess zone: N cells", those cells carry a
    dot on the sheet. You then have two honest options - open one Free
    cell (a real cell of the fixed layout that the board knows is not a
    mine) or take your chances guessing. The board never guesses for you
    and never opens cells you did not click.
-7. Hint runs the same solver and highlights its next certain move.
+8. Hint runs the same solver and highlights its next certain move.
 
 The solver propagates per-cell mine bounds (lower and upper) across the
 whole frontier until they stop tightening, then enumerates small

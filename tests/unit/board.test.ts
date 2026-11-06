@@ -156,8 +156,8 @@ describe("board", () => {
   });
 
   it("never opens cells the click did not reach", () => {
-    // why: the removed rescue-pin fallback revealed a disconnected
-    // mine-free patch as part of an unrelated click
+    // why: a rescue pin must never reveal a disconnected mine-free patch as
+    // part of an unrelated click
     for (const density of [0.22, 0.3, 0.35]) {
       for (let seed = 1; seed <= 3; seed++) {
         const board = new Board(seed * 104729 + density * 1000, density);

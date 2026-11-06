@@ -420,7 +420,7 @@ export class Board {
       this.quotaSearchable = false;
       return "ok";
     }
-    // why: re-rolling cannot repair an ambiguity that old committed
+    // why: re-rolling cannot repair an ambiguity that already-committed
     // chunks created, so the honest layout stands and the ambiguous cells
     // are reported for marking
     this.analysis = null;
@@ -457,12 +457,9 @@ export class Board {
   }
 
   // why: freeze the quotas the accepted numbers were computed against, so
-  // no later re-roll can move a mine under a revealed count; only cells
-  // around the new reveal can change, so the walk stays local
-  // why: freeze the quotas the accepted numbers were computed against, so
   // no later re-roll can move a mine under a revealed count; a chunk is
   // keyed as a whole because its cells were all evaluated against one
-  // quota
+  // quota, and only cells around the new reveal can change
   private lockFreshQuotas(snap: Snapshot): void {
     for (const chunkKey of this.committed) {
       if (snap.committed.has(chunkKey) || this.chunkQuotas.has(chunkKey)) {
@@ -485,10 +482,8 @@ export class Board {
 
   // why: the playout runs on the real board (cascade counts included), so
   // its mutated state is discarded by restoring the snapshot it started
-  // from, and lastRevealed is restored by the caller
-  // why: the playout runs on the real board (cascade counts included), so
-  // its mutated state is discarded by restoring the snapshot it started
-  // from; the reached depth is the fitness the search ranks candidates by
+  // from; the reached depth is the fitness the search ranks candidates by,
+  // and lastRevealed is restored by the caller
   private playoutDepth(depth: number): number {
     const before = this.snapshot(true);
     let reached = 0;
@@ -549,14 +544,6 @@ export class Board {
   private hasProgress(): boolean {
     return findSafeCell(this.revealedMap) !== null;
   }
-
-  // why: a pocket whose ambiguous cells all sit in chunks the re-roll
-  // cannot touch is permanently ambiguous; re-rolling only the fresh
-  // chunks repairs what this reveal's own terrain created
-
-  // why: a pocket's constraints come only from the revealed cells touching
-  // it, so solving that local view decides the pocket without running the
-  // whole-board solver
 
   private ambiguousCells(
     safe: ReadonlySet<string>,

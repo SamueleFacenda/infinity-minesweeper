@@ -165,9 +165,14 @@ GitHub Actions" once in the repository settings).
 ## Who built this
 
 This project was designed and implemented by **opencode**, an AI coding
-agent (model: GLM, trained by z.ai), working under human direction and
-review - including the game engine, solver, generator, UI, tests, nix
-packaging, and this README.
+agent, working under human direction and review - including the game
+engine, solver, generator, UI, tests, nix packaging, and this README.
+
+Two models did that work, both served through the NVIDIA NIM free API:
+
+- **GLM**, trained by z.ai - the original implementation
+- **StepFun AI Step 5 Preview**, trained by StepFun - later repair,
+  review, and release
 
 **Disclaimer:** this is AI-generated code. It ships with a test suite and
 CI, and the game engine is deterministic, but like any AI-written software

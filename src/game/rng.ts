@@ -15,17 +15,17 @@ function fmix32(h: number): number {
 // why: every chunk draws its own quota around the difficulty density, so
 // the board alternates ground that deduction can chew through and ground
 // that stays dense. A uniform frontier at Insane density is ambiguous
-// within a handful of moves, which is what used to stall runs; the
-// modulation keeps the average density at the difficulty level while
-// making most chunks tractable. Measured at 35%: the median deterministic
-// chain grew ~7x with the mine fraction still at the target level
+// within a handful of moves, so the modulation keeps the average density
+// at the difficulty level while making most chunks tractable. Measured at
+// 35%: the median deterministic chain is ~7x longer with the mine fraction
+// still at the target level
 const QUOTA_AMPLITUDE = 1;
 // why: the spread is peaked, so most chunks stay at the nominal density
 // and the difficulty reads uniform, while only rare chunks swing far
-// enough to anchor a long chain; a flat spread made half the board empty
-// islands and half walls, which read as a grid and tripled the cascades.
-// The floor keeps every chunk above this fraction of the nominal density,
-// so no empty islands remain to walk through
+// enough to anchor a long chain; a flat spread splits the board into empty
+// islands and dense walls, which reads as a grid from above and triples the
+// cascades. The floor keeps every chunk above this fraction of the nominal
+// density, so no empty islands remain to walk through
 // why: the floor tightens with difficulty, so the hardest tiers keep no
 // sparse stretches at all while the easy ones keep their cascades; a floor
 // of one leaves the quota uniform for tiers that never stalled

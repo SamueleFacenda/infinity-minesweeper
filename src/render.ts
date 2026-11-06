@@ -5,11 +5,11 @@ import type { CanvasPalette } from "./theme.js";
 import { canvasPalette } from "./theme.js";
 
 // Canvas renderer for a window of the infinite board. Camera keeps world
-// coordinates (cell units) of the viewport center. Hidden cells form one
-// fluid accent-colored sheet (overdrawn edgeless rects); revealed cells are
-// individual rounded tiles carved into it. Cell state changes animate
-// through per-cell records replayed by a requestAnimationFrame loop that
-// runs while animations are pending or the view is still moving.
+// coordinates (cell units) of the viewport center. Hidden cells paint over
+// one fluid accent-colored sheet; revealed cells are individual rounded
+// tiles carved into it. Cell state changes animate through per-cell
+// records replayed by a requestAnimationFrame loop that runs while
+// animations are pending or the view is still moving.
 
 const MIN_CELL_SIZE = 14;
 const MAX_CELL_SIZE = 56;
@@ -20,8 +20,9 @@ const MIN_CORNER_RADIUS = 1;
 // why: island corners (tile corners facing hidden terrain on both sides)
 // round far more than interior tile corners for a smooth island outline
 const ISLAND_CORNER_RADIUS_RATIO = 0.4;
-// why: overlap between neighboring hidden cells hides subpixel seams
-// between sheet rects when the camera sits on fractional coordinates
+// why: the sheet rect overdrawn by half a pixel on every side hides the
+// subpixel seam between neighboring rects when the camera sits on
+// fractional coordinates
 const SHEET_OVERDRAW_PX = 0.5;
 // why: halo bands and the sheet share the accent color, so a concave
 // corner needs no accent rim — the grout pocket fills the rounded
@@ -114,8 +115,8 @@ const CORNER_COLLAPSE_SIDES: readonly CornerCollapseSides[] = [
 ];
 
 // why: a critically damped spring glides the lattice toward its quantized
-// target from rest to rest; an exponential per-frame ease lurched 35% of the
-// remaining gap in the single frame after each wheel tick, which read as
+// target from rest to rest; an exponential per-frame ease lurches 35% of the
+// remaining gap in the single frame after each wheel tick, which reads as
 // shaking while zooming. The exact solution keeps the glide identical at
 // any frame rate, and the velocity survives a retarget so a fast stroke
 // blends into one continuous glide instead of restarting per tick
@@ -269,9 +270,9 @@ export class Renderer {
     const width = this.canvas.clientWidth;
     const height = this.canvas.clientHeight;
     const palette = canvasPalette();
-    // why: one fill covers the whole hidden sheet — per-cell rects only
-    // existed to hide seams that a single fill cannot produce, and the
-    // per-cell fill was the dominant op count when zoomed out
+    // why: one fill covers the whole hidden sheet; a rect per hidden cell
+    // costs one path per cell when zoomed out, and a single fill leaves no
+    // seams because the sheet is one continuous surface
     this.ctx.fillStyle = palette.background;
     this.ctx.fillRect(0, 0, width, height);
     this.ctx.fillStyle = palette.hidden;
@@ -559,8 +560,8 @@ export class Renderer {
   // why: all cell edges derive from one lattice basis — an integer device
   // pitch plus a snapped origin — so every cell is exactly as wide as its
   // neighbors and the whole grid moves by whole device pixels while
-  // panning; rounding each edge separately let adjacent cells differ by a
-  // pixel, which drifted borders apart into misaligned, unevenly
+  // panning; rounding each edge separately lets adjacent cells differ by a
+  // pixel, which drifts borders apart into misaligned, unevenly
   // antialiased cells at zoom levels where cellSize * dpr is fractional.
   // The rendered values ease toward that target instead of snapping each
   // frame: a single wheel tick then glides the grid instead of rescaling
@@ -774,9 +775,9 @@ export class Renderer {
 
   // why: the sheet is one viewport-wide accent fill, so the base under a
   // tile — the mortar strips toward revealed neighbors and the rounded
-  // corner notches the per-cell sheet left dark — must be repainted, or
-  // the island interior reads as an accent grid with accent crosses at
-  // every four-cell intersection. Two grid rules keep the repaint
+  // corner notches of the cell box — must be repainted, or the island
+  // interior reads as an accent grid with accent crosses at every
+  // four-cell intersection. Two grid rules keep the repaint
   // invisible: the rect snaps to the device-pixel grid, because a
   // fractional edge would antialias the background against the accent
   // sheet into a sharp accent line along every boundary; and it
@@ -785,8 +786,7 @@ export class Renderer {
   // leave a one-pixel gap that flashes the sheet through the mortar.
   // Sides facing hidden terrain stay unexpanded so the halo band still
   // owns the island edge, and the tile keeps its own quarter-pixel
-  // edges — tiles still antialias softly over this pure dark base,
-  // exactly as the per-cell sheet left them
+  // edges — tiles still antialias softly over this pure dark base
   private paintMortar(
     sx: number,
     sy: number,
@@ -821,9 +821,9 @@ export class Renderer {
     const cellSize = size + CELL_GAP;
     this.ctx.fillStyle = canvasPalette().hidden;
     // why: bands run flush along the tile body edge and stop at the cell
-    // edges — an into-body overlap only ever showed as accent tabs in the
-    // mortar where a band end crossed a tile gap, and along-axis overshoot
-    // spilled into neighboring cells' mortar
+    // edges — an into-body overlap shows as accent tabs in the
+    // mortar where a band end crosses a tile gap, and along-axis overshoot
+    // spills into neighboring cells' mortar
     if (terrain.top) {
       this.ctx.fillRect(sx, sy - 1, cellSize, 1);
     }
@@ -1191,10 +1191,6 @@ export class Renderer {
     });
   }
 
-  // algorithm: raise = pole grows from the tile, then the pennant slides up
-  // with a slight overshoot; removal plays the same curve reversed + fade.
-  // Pole and pennant draw over a dark underlay so they stay readable when
-  // the accent sheet matches their color.
   private paintFlag(
     sx: number,
     sy: number,

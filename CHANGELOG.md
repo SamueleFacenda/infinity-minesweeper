@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Zoom shaking: the lattice glide toward its quantized zoom target is now a critically damped spring integrated with the frame time instead of an exponential per-frame ease — the old ease lurched 35% of the remaining gap in the single frame after each wheel tick and then froze until the next tick, which read as shaking while zooming in; the spring starts and ends at rest and carries its velocity when a new tick retargets it, so successive notches blend into one continuous glide and a fast wheel stroke cruises smoothly
 - Stale animation replay: a no-op click no longer re-animates the previous reveal or auto-flag batch (cell change batches are cleared at the start of every click path)
 - External corner removal now animates: when a neighboring cell is discovered, a previously revealed tile's island corner (40% radius plus accent crescent) collapses to the tile radius (10%) over the neighbor's reveal instead of snapping in one frame; corners of cells uncovered in the same batch settle with the flood, and internal concave pockets already animated
 

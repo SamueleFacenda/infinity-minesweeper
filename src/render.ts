@@ -113,12 +113,36 @@ const CORNER_COLLAPSE_SIDES: readonly CornerCollapseSides[] = [
   },
 ];
 
-// why: eases the rendered lattice toward its quantized target so zoom and
-// pan glide instead of jumping between integer device-pixel snaps
-const easeToward = (current: number, target: number): number =>
-  Math.abs(target - current) < 0.05
-    ? target
-    : current + (target - current) * 0.35;
+// why: a critically damped spring glides the lattice toward its quantized
+// target from rest to rest; an exponential per-frame ease lurched 35% of the
+// remaining gap in the single frame after each wheel tick, which read as
+// shaking while zooming. The exact solution keeps the glide identical at
+// any frame rate, and the velocity survives a retarget so a fast stroke
+// blends into one continuous glide instead of restarting per tick
+const GLIDE_OMEGA = 25;
+const GLIDE_MAX_STEP_SECONDS = 0.05;
+const GLIDE_SETTLE_DISTANCE = 0.05;
+const GLIDE_SETTLE_SPEED = 0.5;
+
+export function glideStep(
+  value: number,
+  velocity: number,
+  target: number,
+  step: number,
+): [number, number] {
+  const offset = value - target;
+  const slope = velocity + GLIDE_OMEGA * offset;
+  const decay = Math.exp(-GLIDE_OMEGA * step);
+  const moved = (offset + slope * step) * decay;
+  const next = (velocity - GLIDE_OMEGA * slope * step) * decay;
+  if (
+    Math.abs(moved) < GLIDE_SETTLE_DISTANCE &&
+    Math.abs(next) < GLIDE_SETTLE_SPEED
+  ) {
+    return [target, 0];
+  }
+  return [target + moved, next];
+}
 
 interface FlagAnimation {
   readonly placing: boolean;
@@ -198,8 +222,10 @@ export class Renderer {
     originX: 0,
     originY: 0,
   };
+  private latticeVelocity = { pitch: 0, originX: 0, originY: 0 };
   private latticeTarget = { pitch: 1, originX: 0, originY: 0 };
   private latticeStarted = false;
+  private latticeTime = 0;
   private lossAnim: LossAnimation | null = null;
   private animFrame: number | null = null;
   private drawPending = false;
@@ -525,19 +551,53 @@ export class Renderer {
     const originY = Math.round(
       (height / 2 - this.cameraY * this.cellSize) * dpr,
     );
+    const now = performance.now();
     if (!this.latticeStarted || this.lattice.dpr !== dpr) {
-      this.lattice = { dpr, pitch, originX, originY };
-      this.latticeTarget = { pitch, originX, originY };
-      this.latticeStarted = true;
+      this.snapLattice({ dpr, pitch, originX, originY }, now);
       return;
     }
     this.latticeTarget = { pitch, originX, originY };
-    this.lattice = {
-      dpr,
-      pitch: easeToward(this.lattice.pitch, pitch),
-      originX: easeToward(this.lattice.originX, originX),
-      originY: easeToward(this.lattice.originY, originY),
+    const step = Math.min(
+      GLIDE_MAX_STEP_SECONDS,
+      Math.max(0.001, (now - this.latticeTime) / 1000),
+    );
+    this.latticeTime = now;
+    this.glideAxis("pitch", pitch, step);
+    this.glideAxis("originX", originX, step);
+    this.glideAxis("originY", originY, step);
+  }
+
+  private snapLattice(
+    next: { dpr: number; pitch: number; originX: number; originY: number },
+    now: number,
+  ): void {
+    this.lattice = next;
+    this.latticeTarget = {
+      pitch: next.pitch,
+      originX: next.originX,
+      originY: next.originY,
     };
+    this.latticeVelocity = { pitch: 0, originX: 0, originY: 0 };
+    this.latticeStarted = true;
+    this.latticeTime = now;
+  }
+
+  // algorithm: each axis integrates one critically damped spring step
+  // toward its quantized target, so the glide accelerates out of rest and
+  // decelerates into it and successive wheel ticks carry into each other
+  private glideAxis(
+    axis: "pitch" | "originX" | "originY",
+    target: number,
+    step: number,
+  ): void {
+    const [value, velocity] = glideStep(
+      this.lattice[axis],
+      this.latticeVelocity[axis],
+      target,
+      step,
+    );
+    this.lattice[axis] = value;
+    this.latticeVelocity[axis] = velocity;
   }
 
   private latticeSettled(): boolean {

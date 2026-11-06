@@ -1,6 +1,6 @@
 {
   "name": "infinite-minesweeper",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Infinite minesweeper webapp with no-guess boards, built with nix",
   "license": "EUPL-1.2",
   "type": "module",

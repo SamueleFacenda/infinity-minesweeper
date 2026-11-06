@@ -6,8 +6,8 @@ An endless minesweeper board generated lazily and deterministically from a
 seed, verified by a constraint solver after every reveal: a logical next
 move always exists, and when one genuinely cannot, the board says so and
 marks the zone instead of guessing for you. Modern flat design, one-click
-chording, six difficulty tiers up to a brutal 35% mine density, and a
-local leaderboard.
+chording, six difficulty tiers up to a brutal 40% mine density, synthesized
+sound, theming, and a local leaderboard.
 
 ![Gameplay screenshot](docs/screenshot.png)
 
@@ -32,81 +32,101 @@ local leaderboard.
 - **Local leaderboard** - biggest run (tiles cleared) and fastest time to
   200 tiles, per difficulty, stored in your browser
 - **First click is always safe** - every game opens with a safe area
+- **Theming** - two palettes (Nord and warm charcoal) plus six accent
+  colors, switchable in-game and persisted per browser; the board, HUD and
+  buttons all follow the accent
+- **Sound** - WebAudio-synthesized feedback with no audio files: flags
+  click, reveals crunch (deeper as the flood grows), a loss rings out
+- **Flag-first mode** - a HUD toggle swaps short-click/right-click (and
+  tap/long-press) between flag and open; numbers always chord
+- **Mobile-ready** - one-finger drag pans, two-finger pinch zooms, a short
+  tap acts, a long press flags; all animation yields to
+  `prefers-reduced-motion`
+- **Loss review** - a taunting end screen, then an Inspect board button
+  that leaves the final board pannable and zoomable with wrong flags
+  crossed out
 
 ## Controls
 
-| Action            | Control                         |
-| ----------------- | ------------------------------- |
-| Reveal a cell     | Left click                      |
-| Flag / unflag     | Right click                     |
-| Chord / auto-fill | Left click on a revealed number |
-| Hint              | `H` or the Hint button          |
-| Free cell         | `F` or the Free cell button     |
-| Pan               | Drag, or arrow keys             |
-| Zoom              | Mouse wheel                     |
-| New game          | `N` or the New game button      |
-| Difficulty        | Dropdown in the top bar         |
+| Action            | Control                              |
+| ----------------- | ------------------------------------ |
+| Reveal a cell     | Left click                           |
+| Flag / unflag     | Right click                          |
+| Chord / auto-fill | Left click on a revealed number      |
+| Swap flag/open    | Flag first toggle (top bar)          |
+| Hint              | `H` or the Hint button               |
+| Free cell         | `F` or the Free cell button          |
+| Pan               | Drag, or arrow keys                  |
+| Zoom              | Mouse wheel, or pinch                |
+| New game          | `N` or the New game button           |
+| Difficulty        | Dropdown in the top bar              |
+| Leaderboard       | Leaderboard button                   |
+| Theme / accent    | Nord/Charcoal button and accent dots |
+| Inspect board     | Button on the end screen             |
 
 ## Difficulties
 
-| Tier   | Mine density | Notes                                       |
-| ------ | ------------ | ------------------------------------------- |
-| Easy   | 12%          | near the classic Beginner board (12.3%)     |
-| Medium | 17%          | near the classic Intermediate board (15.6%) |
-| Hard   | 22%          | just past classic Expert (20.6%)            |
-| Expert | 26%          | beyond-Expert calibration                   |
-| Evil   | 30%          | every frontier needs subset logic           |
-| Insane | 35%          | dense mine walls; the generator works hard  |
+| Tier   | Mine density | Notes                                         |
+| ------ | ------------ | --------------------------------------------- |
+| Easy   | 12%          | matches the classic Beginner board (12.3%)    |
+| Medium | 20%          | past classic Intermediate (15.6%)             |
+| Hard   | 25%          | past classic Expert (20.6%)                   |
+| Expert | 30%          | every frontier needs subset logic             |
+| Evil   | 35%          | deep deduction; re-rolls get expensive        |
+| Insane | 40%          | dense mine walls; the generator works hardest |
 
-The classic reference ladder (Beginner 9×9/10 = 12.3%, Intermediate
-16×16/40 = 15.6%, Expert 30×16/99 = 20.6%) is the community standard; the
-tiers beyond Expert are our own calibration - past that point no universal
-standard exists, only custom boards and "evil" no-guess modes like
-minesweeper.online's (see References).
+Density is the settled mine fraction of generated terrain, not a nominal
+parameter - the calibration compensates for the per-chunk quota floor, so
+the board you play lands on the percentage in the table. The classic
+reference ladder (Beginner 9×9/10 = 12.3%, Intermediate 16×16/40 = 15.6%,
+Expert 30×16/99 = 20.6%) is the community standard; the tiers past Expert
+are our own calibration - past that point no universal standard exists,
+only custom boards and "evil" no-guess modes like minesweeper.online's
+(see References).
 
 ## How the no-guess engine works
 
 1. A cell's mine status is a hash of `(seed, chunk nonce, x, y)` - the
    infinite board is fully defined yet stored nowhere.
-2. Every chunk draws its own mine quota around the difficulty density
-   (`density * (1 + spread)`, `spread = sign(u) * u^2` for uniform `u` in
-   [-1, 1], floored at 60% of the density), so the board still alternates
-   ground deduction can chew through and ground that stays dense while
-   the global mine fraction stays at the difficulty level. A uniform
-   frontier at Insane density is ambiguous within a handful of moves;
-   the peaked spread keeps most chunks at the nominal density - the
-   difficulty reads uniform - while only rare chunks swing far enough to
-   anchor a chain, and the floor leaves no empty islands to walk through.
-   Quotas stay uniform below Expert, because those tiers never stalled
-   and their cascades are expensive.
-3. Chunks (16×16) become **committed** (nonce frozen) once they are visible
-   to the player; before commitment the generator may re-roll them
-   invisibly. A chunk's quota freezes with its first visible number, so
-   no settled region ever changes density; only the opening reveal
-   searches over the quotas of its still-unrevealed chunks, and whatever
-   it picks is frozen the moment the numbers are shown.
-4. Every reveal plays out tentatively: fresh chunks are re-rolled inside a
-   budget scaled by difficulty, and the candidate whose deterministic
-   chain runs deepest wins. Harder tiers get bigger budgets and deeper
-   opening guarantees; the light tiers stay first-fit because they never
-   stalled. Generation can take up to about a second on Insane, so a
-   "Generating board..." indicator paints first and the run clock stops
-   while it runs.
-5. Every reveal plays out tentatively; the solver then checks that the
-   visible position contains at least one provably safe cell and that
-   every enclosed pocket the reveal created is fully deducible. If either
-   check fails, the freshly committed chunks are re-rolled.
-6. The opening click also requires a deterministic playout scaled by
-   density (25 to 60 moves), so every game starts on terrain that stays
-   solvable well past the first moves.
-7. When re-rolling cannot repair ambiguity that already-committed terrain
+2. Every 16×16 chunk draws its own mine quota around the difficulty
+   density: `density * (1 + spread)` with a peaked spread
+   (`spread = sign(u) * u^2` for uniform `u` in [-1, 1]), clamped from
+   below at a fraction of the density. Easy, Medium and Hard use the
+   density itself, because those tiers never stalled and their cascades are
+   expensive; Expert and Evil floor at 80%, Insane at 85%. A uniform
+   frontier at Insane density is ambiguous within a handful of moves, so
+   the spread lets most chunks sit near the nominal density - the
+   difficulty reads uniform - while rare chunks swing far enough to anchor
+   a long deterministic chain, and the floor leaves no empty islands to
+   walk through. The calibration compensates for the floor, so the settled
+   mine fraction still lands on the table above.
+3. Chunks become **committed** (nonce frozen) once they are visible to the
+   player; before commitment the generator may re-roll them invisibly. A
+   chunk's quota freezes with its first visible number, so no settled
+   region ever changes density; only the opening reveal searches over the
+   quotas of its still-unrevealed chunks, and whatever it picks is frozen
+   the moment the numbers are shown.
+4. Every reveal plays out tentatively. The first attempt is the honest
+   outcome - an explosion there ends the run. Later attempts re-roll the
+   freshly committed chunks inside a per-tier budget (50 ms on Easy up to
+   900 ms on Insane) and keep the candidate whose deterministic chain runs
+   deepest instead of the first acceptable one; the opening reveal also
+   requires a playout 25 to 60 moves deep, scaled by density, so every
+   game starts on terrain that stays solvable well past the first moves.
+   Generation can take up to about a second on Insane, so a "Generating
+   board..." indicator paints first and the run clock stops while it runs.
+5. A candidate is accepted only when the position it produces holds at
+   least one provably safe cell and every enclosed pocket of hidden cells
+   the reveal created is fully deducible. If either check fails, the
+   freshly committed chunks re-roll.
+6. When re-rolling cannot repair ambiguity that already-committed terrain
    created, the honest layout stands and the ambiguous cells are
    **marked**: the HUD shows "Guess zone: N cells", those cells carry a
    dot on the sheet. You then have two honest options - open one Free
    cell (a real cell of the fixed layout that the board knows is not a
    mine) or take your chances guessing. The board never guesses for you
    and never opens cells you did not click.
-8. Hint runs the same solver and highlights its next certain move.
+7. Hint runs the same solver and highlights its next certain move.
 
 The solver propagates per-cell mine bounds (lower and upper) across the
 whole frontier until they stop tightening, then enumerates small

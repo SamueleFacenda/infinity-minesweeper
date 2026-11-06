@@ -34,7 +34,7 @@
           ...
         }:
         let
-          version = "0.1.0";
+          version = "1.0.0";
 
           # Source without build artifacts so the pre-commit fallback
           # `git add .` never tracks node_modules or dist

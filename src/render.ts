@@ -510,7 +510,8 @@ export class Renderer {
     ) {
       this.drawHintGlow(sx, sy, this.cellSize);
     }
-    if (this.guessZone.has(key)) this.drawGuessMarker(sx, sy, cellW, cellH);
+    if (this.guessZone.has(key))
+      this.drawGuessMarker(sx, sy, this.cellSize, this.cellSize);
   }
 
   // why: a small centered dot reads as "pinned" without hiding the sheet

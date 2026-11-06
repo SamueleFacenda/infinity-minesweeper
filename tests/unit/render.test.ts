@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cornerCollapseRegistrations } from "../../src/render.js";
+import { cornerCollapseRegistrations, glideStep } from "../../src/render.js";
 
 const START_TIME = 1000;
 
@@ -102,5 +102,39 @@ describe("cornerCollapseRegistrations", () => {
     );
 
     expect(registrations.size).toBe(0);
+  });
+});
+
+describe("glideStep", () => {
+  const step = 1 / 60;
+
+  it("starts the glide from rest instead of jumping a third of the gap", () => {
+    const [value, velocity] = glideStep(0, 0, 60, step);
+
+    expect(value).toBeGreaterThan(0);
+    expect(value).toBeLessThan(6);
+    expect(velocity).toBeGreaterThan(0);
+  });
+
+  it("settles onto the target from rest without overshooting", () => {
+    let value = 0;
+    let velocity = 0;
+    for (let frame = 0; frame < 60; frame++) {
+      [value, velocity] = glideStep(value, velocity, 60, step);
+      expect(value).toBeLessThanOrEqual(60);
+    }
+
+    expect(value).toBe(60);
+    expect(velocity).toBe(0);
+  });
+
+  it("keeps its velocity when a new target retargets it mid-glide", () => {
+    let value = 0;
+    let velocity = 0;
+    [value, velocity] = glideStep(value, velocity, 60, step);
+    const first = velocity;
+    [value, velocity] = glideStep(value, velocity, 60, step);
+
+    expect(velocity).toBeGreaterThan(first);
   });
 });

@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Zoom/pan rendering performance: the hidden sheet is one viewport-wide accent fill instead of a rect per hidden cell, numbers render from a cached hi-dpi glyph atlas (one drawImage per numbered cell), and resting flags render from a cached hi-dpi sprite — only the raise/remove animation still draws live paths; sprite render sizes are bucketed so the eased zoom glide does not rebuild a cache per frame; each revealed cell repaints its whole cell box in the background color first (mortar strips plus the rounded corner notches the per-cell sheet left dark), snapped to the device-pixel grid so the repaint antialiases nothing against the accent sheet and overlapped one device pixel toward revealed neighbors so the fractional glide pitch cannot open a flashing gap, so the discovered island still reads as individual tiles carved into the sheet with no accent inside it
 - Pan/zoom input redraws coalesce into one canvas draw per animation frame instead of one per mouse event; mines render from a cached hi-dpi sprite, keeping board inspection smooth after loss
 
 - Loss sequence pacing: slower reveal ripple (600ms wave, 50ms stagger), 1.2s explosion ring, ~2s unobstructed board view before the end screen fades in over 900ms; the hold is skipped under `prefers-reduced-motion`
@@ -64,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Zoom shaking: the lattice glide toward its quantized zoom target is now a critically damped spring integrated with the frame time instead of an exponential per-frame ease — the old ease lurched 35% of the remaining gap in the single frame after each wheel tick and then froze until the next tick, which read as shaking while zooming in; the spring starts and ends at rest and carries its velocity when a new tick retargets it, so successive notches blend into one continuous glide and a fast wheel stroke cruises smoothly
 - Stale animation replay: a no-op click no longer re-animates the previous reveal or auto-flag batch (cell change batches are cleared at the start of every click path)
 - External corner removal now animates: when a neighboring cell is discovered, a previously revealed tile's island corner (40% radius plus accent crescent) collapses to the tile radius (10%) over the neighbor's reveal instead of snapping in one frame; corners of cells uncovered in the same batch settle with the flood, and internal concave pockets already animated
 

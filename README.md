@@ -93,13 +93,16 @@ only custom boards and "evil" no-guess modes like minesweeper.online's
    (`spread = sign(u) * u^2` for uniform `u` in [-1, 1]), clamped from
    below at a fraction of the density. Easy, Medium and Hard use the
    density itself, because those tiers never stalled and their cascades are
-   expensive; Expert and Evil floor at 80%, Insane at 85%. A uniform
-   frontier at Insane density is ambiguous within a handful of moves, so
-   the spread lets most chunks sit near the nominal density - the
-   difficulty reads uniform - while rare chunks swing far enough to anchor
-   a long deterministic chain, and the floor leaves no empty islands to
-   walk through. The calibration compensates for the floor, so the settled
-   mine fraction still lands on the table above.
+   expensive; the deep tiers floor at 60%. A uniform frontier at Insane
+   density is ambiguous within a handful of moves, so the spread lets most
+   chunks sit near the nominal density - the difficulty reads uniform -
+   while rare chunks swing far enough to anchor a long deterministic chain,
+   and the floor leaves no empty islands to walk through. The floor has to
+   stay low on the deep tiers for that reason: with every chunk pinned near
+   the nominal density the whole frontier is uniformly ambiguous and a
+   guess zone lands within the first hundred cells instead of past them.
+   The calibration compensates for the floor, so the settled mine fraction
+   still lands on the table above.
 3. Chunks become **committed** (nonce frozen) once they are visible to the
    player; before commitment the generator may re-roll them invisibly. A
    chunk's quota freezes with its first visible number, so no settled

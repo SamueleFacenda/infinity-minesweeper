@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reveal precompute: the next reveal is searched while the browser is idle (twice the interactive budget) and adopted in O(1) by the click that lands on it, so a prepared click paints instantly with no "Generating board..." indicator and no search on the click path; a click that misses the prepared cell falls back to the interactive search unchanged
 - `Board.nextRevealTarget()` / `zoneFreeTarget()`: the cell the next reveal should open (the certain move, or the free cell of a marked zone) without revealing it, so the UI can aim the precompute
 
+### Changed
+
+- Per-chunk quota floor lowered from 80/85/90% to 60% of the nominal density on the deep tiers: a frontier where every chunk sits at the nominal density is uniformly ambiguous, so sparse stretches must survive past Expert. Measured over 8 seeds and 400 guided reveals per seed: the first guess zone at Insane density moves from the 23rd-208th revealed cell to the 166th-438th, zones per run drop from 176 to 53, and the settled mine fraction stays on the tier
+- The quota floor lives in one table (`QUOTA_FLOORS`) and is covered by tests that assert sparse stretches exist and the settled fraction stays near the nominal density
+
 ## [1.0.0] - 2026-11-06
 
 First release.

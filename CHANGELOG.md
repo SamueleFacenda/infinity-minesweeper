@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Bottom-of-screen glitch when the guess-zone counter appears: the HUD reflows to a second line, shrinking the canvas CSS box with no window resize event, so the canvas bitmap outlived its box and the browser squashed the stale frame into it (a bottom strip that kept old cells and a vertically compressed board). The renderer now observes the canvas box with a `ResizeObserver` instead of listening for window resizes, which also covers plain window resizes; the bitmap tracks its box across HUD wrap/unwrap, window resizes and short windows
+
+### Changed
+
+- Zoom/pan render cost per frame cut by roughly a third: animation lookups return their settled value without building a key when no reveal, corner-collapse or flag animation is pending, hidden cells skip the flag/guess-zone key entirely when no flag animates and no zone is marked, the reveal crossfade sheet rect is skipped at full reveal (it painted at zero alpha), and the number and flag atlases are looked up once per frame instead of once per cell — every revealed tile in a frame shares one lattice size. Rendered output is unchanged
+
 ## [1.0.0] - 2026-11-06
 
 First release.

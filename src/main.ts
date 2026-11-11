@@ -72,6 +72,19 @@ class Game {
   private theme: ThemeName;
   private accent: string;
   private accentDotButtons: HTMLButtonElement[] = [];
+  // why: the HUD reflows when the guess zone counter appears, which shrinks
+  // the canvas CSS box without any window resize event - the bitmap then
+  // outlives its box and the browser squashes the stale frame into it, so
+  // observe the canvas box itself instead of the window. The observer covers
+  // window resizes too, because a window resize changes the canvas box as
+  // well
+  // why: the HUD reflows when the guess zone counter appears, which shrinks
+  // the canvas CSS box without any window resize event - the bitmap then
+  // outlives its box and the browser squashes the stale frame into it, so
+  // observe the canvas box itself instead of the window. The observer covers
+  // window resizes too, because a window resize changes the canvas box as
+  // well
+  private readonly canvasResizeObserver: ResizeObserver;
 
   constructor(
     private readonly elements: Elements,
@@ -85,6 +98,10 @@ class Game {
     this.board = this.newBoard();
     this.renderer = new Renderer(this.elements.canvas, ctx, this.board);
     this.flagFirst = settings.flagFirst ?? this.renderer.coarsePointer;
+    this.canvasResizeObserver = new ResizeObserver(() => {
+      this.onResize();
+    });
+    this.canvasResizeObserver.observe(this.elements.canvas);
     this.buildAccentDots();
     this.applyAppearance();
     this.populateDifficulties();
@@ -168,9 +185,6 @@ class Game {
       },
       { passive: false },
     );
-    window.addEventListener("resize", () => {
-      this.onResize();
-    });
     window.addEventListener("keydown", (event) => {
       this.onKeyDown(event);
     });

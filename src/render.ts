@@ -236,6 +236,11 @@ export class Renderer {
   private mineSprite: MineSprite | null = null;
   private numberSprite: NumberSprite | null = null;
   private flagSprite: FlagSprite | null = null;
+  // why: one frame paints every tile at the same lattice size, so the
+  // bucketed atlas lookup and its palette-color join run once per frame
+  // instead of once per cell; a new frame drops the cached sprite
+  private frameNumberSprite: NumberSprite | null = null;
+  private frameFlagSprite: HTMLCanvasElement | null = null;
   readonly reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
     .matches;
   // why: the per-tile white flash on reveal reads as a full-screen strobe
@@ -282,6 +287,8 @@ export class Renderer {
     // softly at every zoom and pixel ratio
     this.snapXs.clear();
     this.snapYs.clear();
+    this.frameNumberSprite = null;
+    this.frameFlagSprite = null;
     this.buildLattice(width, height);
     // why: the painted range derives from the rendered lattice rather than
     // the exact camera math — while the lattice eases toward its target the
@@ -487,13 +494,17 @@ export class Renderer {
     const sx = this.snapX(x);
     const sy = this.snapY(y);
     const board = this.board;
-    const key = keyOf(x, y);
+    // why: a resting flag lives on the board, not in the animation map, so
+    // the key is only needed while a flag transitions or a guess zone is
+    // marked - the common case then skips two hash lookups per hidden cell
+    const needsKey = this.flagAnims.size > 0 || this.guessZone.size > 0;
+    const key = needsKey ? keyOf(x, y) : null;
     const hovered =
       this.hoverCell !== null &&
       this.hoverCell.x === x &&
       this.hoverCell.y === y;
     if (hovered) this.drawHoverOverlay(sx, sy);
-    const flagAnim = this.flagAnims.get(key);
+    const flagAnim = key === null ? undefined : this.flagAnims.get(key);
     if (board.isFlagged(x, y)) {
       this.drawFlag(sx, sy, this.cellSize, flagAnim ?? null);
       if (board.status === "lost" && !board.isMine(x, y)) {
@@ -511,7 +522,7 @@ export class Renderer {
     ) {
       this.drawHintGlow(sx, sy, this.cellSize);
     }
-    if (this.guessZone.has(key))
+    if (key !== null && this.guessZone.has(key))
       this.drawGuessMarker(sx, sy, this.cellSize, this.cellSize);
   }
 
@@ -659,6 +670,8 @@ export class Renderer {
   }
 
   private revealProgressFor(key: string): number {
+    // why: an empty map makes every lookup a miss, so the key is not built
+    if (this.revealAnims.size === 0) return 1;
     const anim = this.revealAnims.get(key);
     if (anim === undefined) return 1;
     return clamp01(
@@ -670,6 +683,7 @@ export class Renderer {
   // revealed cells settles, so the bite grows with the slowest of their
   // reveal animations instead of popping in
   private biteProgress(cells: readonly (readonly [number, number])[]): number {
+    if (this.revealAnims.size === 0) return 1;
     let progress = 1;
     for (const [x, y] of cells) {
       const cellProgress = this.revealProgressFor(keyOf(x, y));
@@ -689,6 +703,8 @@ export class Renderer {
     size: number,
   ): number {
     if (island) return islandRadius(size);
+    // why: an empty map cannot hold this corner, so the key is not built
+    if (this.cornerCollapses.size === 0) return tileRadius(size);
     const collapse = this.cornerCollapses.get(cornerCollapseKey(x, y, corner));
     if (collapse === undefined) return tileRadius(size);
     const progress = clamp01(
@@ -757,8 +773,12 @@ export class Renderer {
     this.paintNotchCorners(tsx, tsy, size, terrain);
     this.ctx.globalAlpha = progress;
     this.drawNumber(x, y, tsx, tsy, size);
-    this.ctx.globalAlpha = 1 - progress;
-    this.drawSheetRect(tsx, tsy, size + CELL_GAP);
+    // why: a fully revealed tile crossfades to nothing, so the sheet rect it
+    // would leave behind is skipped instead of painted at zero alpha
+    if (progress < 1) {
+      this.ctx.globalAlpha = 1 - progress;
+      this.drawSheetRect(tsx, tsy, size + CELL_GAP);
+    }
     const flash = this.coarsePointer ? 0 : progress * (1 - progress) * 4 * 0.22;
     if (flash > 0.01) {
       this.ctx.globalAlpha = flash;
@@ -1109,7 +1129,7 @@ export class Renderer {
   ): void {
     const count = this.board.countAt(x, y);
     if (count === undefined || count === 0) return;
-    const sprite = this.numberSpriteFor(size);
+    const sprite = this.numberSpriteForFrame(size);
     const slot = sprite.size * sprite.ratio;
     this.ctx.drawImage(
       sprite.canvas,
@@ -1150,6 +1170,17 @@ export class Renderer {
     return this.numberSprite;
   }
 
+  // why: every revealed tile in a frame shares one lattice size, so the
+  // glyph atlas lookup and its palette-color join run once per frame
+  // instead of once per cell while the lattice glides
+  private numberSpriteForFrame(size: number): NumberSprite {
+    const cached = this.frameNumberSprite;
+    if (cached !== null) return cached;
+    const sprite = this.numberSpriteFor(size);
+    this.frameNumberSprite = sprite;
+    return sprite;
+  }
+
   // why: a resting flag is a fixed drawing redrawn on every frame while
   // zooming; the bucketed raster replaces its path operations with one
   // drawImage. Only the raise/remove animation still draws live paths
@@ -1172,6 +1203,16 @@ export class Renderer {
     return canvas;
   }
 
+  // why: every flag in a frame shares one lattice size, so the flag atlas
+  // lookup runs once per frame instead of once per flagged hidden cell
+  private flagSpriteForFrame(size: number): HTMLCanvasElement {
+    const cached = this.frameFlagSprite;
+    if (cached !== null) return cached;
+    const sprite = this.flagSpriteFor(size);
+    this.frameFlagSprite = sprite;
+    return sprite;
+  }
+
   private drawFlag(
     sx: number,
     sy: number,
@@ -1179,7 +1220,7 @@ export class Renderer {
     anim: FlagAnimation | null,
   ): void {
     if (anim === null) {
-      this.ctx.drawImage(this.flagSpriteFor(size), sx, sy, size, size);
+      this.ctx.drawImage(this.flagSpriteForFrame(size), sx, sy, size, size);
       return;
     }
     const t = clamp01((performance.now() - anim.startTime) / FLAG_ANIMATION_MS);

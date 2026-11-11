@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Reveal precompute: the next reveal is searched while the browser is idle (twice the interactive budget) and adopted in O(1) by the click that lands on it, so a prepared click paints instantly with no "Generating board..." indicator and no search on the click path; a click that misses the prepared cell falls back to the interactive search unchanged
+- `Board.nextRevealTarget()` / `zoneFreeTarget()`: the cell the next reveal should open (the certain move, or the free cell of a marked zone) without revealing it, so the UI can aim the precompute
+
 ## [1.0.0] - 2026-11-06
 
 First release.

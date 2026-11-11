@@ -47,6 +47,73 @@ describe("board", () => {
     // deep tiers, so the whole ladder costs more than a frame budget
   }, 60_000);
 
+  it("applies a precomputed reveal to the clicked cell", () => {
+    const board = new Board(42, 0.22);
+    board.reveal(0, 0);
+    const hint = board.findHint();
+    expect(hint).not.toBeNull();
+    if (hint === null) return;
+    board.prepareNext(hint);
+    expect(board.hasPrepared(hint.x, hint.y)).toBe(true);
+    expect(board.hasPrepared(hint.x + 1, hint.y)).toBe(false);
+    const before = board.revealedCount;
+    expect(board.reveal(hint.x, hint.y)).toBe("ok");
+    expect(board.revealedCount).toBeGreaterThan(before);
+    expect(board.lastRevealed).toContainEqual([hint.x, hint.y]);
+    expect(board.hasPrepared(hint.x, hint.y)).toBe(false);
+  });
+
+  it("keeps the no-guess guarantee through precomputed reveals", () => {
+    // why: the adopted state is the state the search accepted, so a certain
+    // move must still exist right after it lands
+    for (const seed of [7, 7919]) {
+      const board = new Board(seed, 0.28);
+      board.reveal(0, 0);
+      for (let step = 0; step < 40; step++) {
+        const target = board.nextRevealTarget();
+        expect(target).not.toBeNull();
+        if (target === null) return;
+        board.prepareNext(target);
+        expect(board.reveal(target.x, target.y)).toBe("ok");
+        expect(board.deductionState().certainMove).toBe(true);
+      }
+    }
+  }, 60_000);
+
+  it("drops a precomputed reveal when the board changes", () => {
+    const board = new Board(42, 0.22);
+    board.reveal(0, 0);
+    const hint = board.findHint();
+    expect(hint).not.toBeNull();
+    if (hint === null) return;
+    board.prepareNext(hint);
+    board.toggleFlag(50, 50);
+    expect(board.hasPrepared(hint.x, hint.y)).toBe(false);
+    expect(board.reveal(hint.x, hint.y)).toBe("ok");
+    expect(board.status).toBe("playing");
+  });
+
+  it("precomputes the free cell of a guess zone", () => {
+    const board = new Board(104729 + 600, 0.6);
+    board.reveal(0, 0);
+    let target = board.nextRevealTarget();
+    for (let step = 0; step < 120 && target !== null; step++) {
+      if (board.deductionState().certainMove) {
+        board.prepareNext(target);
+        expect(board.reveal(target.x, target.y)).toBe("ok");
+      } else {
+        // why: a zone reveal usually has no accepted candidate to adopt,
+        // so the free cell then pays the interactive search as before
+        board.prepareNext(target);
+        const freed = board.freeCell();
+        expect(freed).toEqual(target);
+        expect(board.status).toBe("playing");
+      }
+      target = board.nextRevealTarget();
+    }
+    expect(board.status).toBe("playing");
+  }, 120_000);
+
   it("keeps the no-guess guarantee for many seeds", () => {
     for (let seed = 1; seed <= 5; seed++) {
       const board = new Board(seed * 7919, 0.22);

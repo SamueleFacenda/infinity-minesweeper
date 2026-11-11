@@ -68,6 +68,7 @@ class Game {
   private touchActive = false;
   private pinchLast: { distance: number; x: number; y: number } | null = null;
   private lastTouchAt = 0;
+  private prepareHandle: number | null = null;
   private flagFirst: boolean;
   private theme: ThemeName;
   private accent: string;
@@ -351,6 +352,7 @@ class Game {
     this.renderer.hintCell = null;
     this.updateStats();
     this.renderer.requestDraw();
+    this.schedulePrepare();
   }
 
   private onTouchStart(event: TouchEvent): void {
@@ -534,7 +536,19 @@ class Game {
 
   private clickCell(cell: Cell): void {
     if (this.board.status !== "playing") return;
+    if (this.board.hasPrepared(cell.x, cell.y)) {
+      this.revealPrepared(cell);
+      return;
+    }
     void this.runReveal(cell);
+  }
+
+  // why: the reveal of this cell is already searched, so the click pays no
+  // generation time and no indicator paints
+  private revealPrepared(cell: Cell): void {
+    const result = this.board.reveal(cell.x, cell.y);
+    this.renderer.hintCell = null;
+    this.applyResult(result, cell);
   }
 
   private applyResult(result: ClickResult, origin: Cell): void {
@@ -556,6 +570,23 @@ class Game {
       playLossSound();
       this.scheduleLossOverlay();
     }
+    this.schedulePrepare();
+  }
+
+  // why: the next reveal is searched while the browser is idle, so the
+  // click that follows it lands without the generating indicator; a click
+  // that misses the prepared cell pays the interactive search as before
+  private schedulePrepare(): void {
+    if (this.prepareHandle !== null) return;
+    const idle = typeof window.requestIdleCallback;
+    const prepare = (): void => {
+      this.prepareHandle = null;
+      this.board.prepareNext(this.board.nextRevealTarget());
+    };
+    this.prepareHandle =
+      idle === "function"
+        ? window.requestIdleCallback(prepare)
+        : window.setTimeout(prepare, 0);
   }
 
   // why: the un-blurred board (ring, mines, wrong flags) stays visible
@@ -628,6 +659,15 @@ class Game {
 
   private onFreeCell(): void {
     if (this.board.status !== "playing") return;
+    const target = this.board.zoneFreeTarget();
+    if (target !== null && this.board.hasPrepared(target.x, target.y)) {
+      const cell = this.board.freeCell();
+      if (cell !== null) {
+        this.renderer.hintCell = null;
+        this.applyResult("ok", cell);
+        return;
+      }
+    }
     // why: the free cell also waits for the reveal search, so it shows the
     // indicator like any other reveal
     void this.runFreeCell();

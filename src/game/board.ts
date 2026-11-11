@@ -16,6 +16,36 @@ export type ClickResult = "lost" | "ok";
 export interface DeductionState {
   readonly certainMove: boolean;
   readonly guessCells: readonly Cell[];
+  readonly hint: Cell | null;
+}
+
+// A reveal the board already searched for while it was idle: the accepted
+// candidate's whole state, ready to be adopted on the matching click.
+interface PreparedReveal {
+  readonly x: number;
+  readonly y: number;
+  // why: every mutation of the persisted state bumps the version, so a
+  // prepared state from before a change can never be adopted
+  readonly version: number;
+  readonly board: Board;
+}
+
+type RevealOutcome = "accepted" | "committed" | "lost";
+
+interface BestCandidate {
+  readonly snap: Snapshot;
+  readonly revealed: [number, number][];
+  readonly score: number;
+}
+
+interface AttemptSearch {
+  readonly cells: readonly [number, number][];
+  readonly deep: boolean;
+  readonly profile: GenerationProfile;
+  readonly snap: Snapshot;
+  best: BestCandidate | null;
+  fastPathTried: boolean;
+  pocketChecks: number;
 }
 
 // Generation effort per tier. Every reveal re-rolls fresh chunks until
@@ -123,6 +153,25 @@ const EASIEST_PROFILE: GenerationProfile = {
 // without passing the check
 const MAX_POCKET_CHECKS = 3;
 
+// why: an idle precompute has no player waiting on it, so it can afford a
+// longer search than the interactive one and find a deeper chain
+// shortcut: one synchronous block per reveal (up to twice the tier budget);
+// chunk the search across idle periods if a long idle stall ever matters
+const PREPARE_BUDGET_FACTOR = 2;
+
+function copyInto(
+  target: Map<string, number>,
+  source: ReadonlyMap<string, number>,
+): void {
+  target.clear();
+  for (const [key, value] of source) target.set(key, value);
+}
+
+function copySetInto(target: Set<string>, source: ReadonlySet<string>): void {
+  target.clear();
+  for (const value of source) target.add(value);
+}
+
 const AREA_OFFSETS: readonly (readonly [number, number])[] = [
   [-1, -1],
   [0, -1],
@@ -164,6 +213,10 @@ export class Board {
   // mines under numbers the player had already read
   private readonly chunkQuotas = new Map<string, number>();
   private analysis: DeductionState | null = null;
+  // why: bumped by every change of the persisted state, so a prepared
+  // reveal older than the current version is discarded instead of adopted
+  private stateVersion = 0;
+  private prepared: PreparedReveal | null = null;
 
   constructor(seed: number, density: number) {
     this.seed = seed;
@@ -202,19 +255,27 @@ export class Board {
   toggleFlag(x: number, y: number): void {
     const key = keyOf(x, y);
     if (this.status !== "playing" || this.revealedMap.has(key)) return;
+    this.prepared = null;
     if (this.flagSet.has(key)) {
       this.flagSet.delete(key);
     } else {
       this.flagSet.add(key);
     }
+    this.stateVersion++;
   }
 
   reveal(x: number, y: number): ClickResult {
     if (this.status !== "playing") return "ok";
+    const prepared = this.prepared;
+    this.prepared = null;
     this.lastRevealed = [];
     this.lastFlagged = [];
     const key = keyOf(x, y);
     if (this.revealedMap.has(key) || this.flagSet.has(key)) return "ok";
+    if (this.adoptsPrepared(prepared, x, y)) {
+      this.adoptFrom(prepared.board);
+      return "ok";
+    }
     if (this.revealedMap.size === 0) this.pinArea(x, y);
     return this.revealGroup([[x, y]], this.revealedMap.size === 0);
   }
@@ -224,6 +285,7 @@ export class Board {
   // all mines by simple counting.
   clickNumber(x: number, y: number): ClickResult {
     if (this.status !== "playing") return "ok";
+    this.prepared = null;
     this.lastRevealed = [];
     this.lastFlagged = [];
     const count = this.revealedMap.get(keyOf(x, y));
@@ -239,6 +301,7 @@ export class Board {
         autoFlagged.push([nx, ny]);
       }
       this.lastFlagged = autoFlagged;
+      this.stateVersion++;
     }
     return "ok";
   }
@@ -248,11 +311,19 @@ export class Board {
     return first === null ? null : parseKey(first);
   }
 
+  // The cell the next reveal should open: a certain move when deduction
+  // found one, otherwise the free cell that escapes the marked zone.
+  nextRevealTarget(): Cell | null {
+    if (this.status !== "playing") return null;
+    const state = this.deductionState();
+    return state.certainMove ? state.hint : this.zoneFreeTarget();
+  }
+
   // Deliberate escape from a marked guess zone: the layout is fixed, so a
   // cell the board knows is not a mine is a real cell, not fabricated
   // terrain. Only a state without a certain move may open one, and only
   // unflagged cells of that zone qualify.
-  freeCell(): Cell | null {
+  zoneFreeTarget(): Cell | null {
     if (this.status !== "playing") return null;
     const state = this.deductionState();
     if (state.certainMove) return null;
@@ -260,11 +331,106 @@ export class Board {
       const key = keyOf(cell.x, cell.y);
       if (this.flagSet.has(key) || this.revealedMap.has(key)) continue;
       if (this.mineAt(cell.x, cell.y)) continue;
-      return this.revealGroup([[cell.x, cell.y]], false) === "lost"
-        ? null
-        : cell;
+      return cell;
     }
     return null;
+  }
+
+  freeCell(): Cell | null {
+    if (this.status !== "playing") return null;
+    const target = this.zoneFreeTarget();
+    if (target === null) return null;
+    const prepared = this.prepared;
+    this.prepared = null;
+    if (this.adoptsPrepared(prepared, target.x, target.y)) {
+      this.adoptFrom(prepared.board);
+      return target;
+    }
+    return this.revealGroup([[target.x, target.y]], false) === "lost"
+      ? null
+      : target;
+  }
+
+  hasPrepared(x: number, y: number): boolean {
+    const prepared = this.prepared;
+    return (
+      prepared !== null &&
+      prepared.x === x &&
+      prepared.y === y &&
+      prepared.version === this.stateVersion
+    );
+  }
+
+  // Searches the reveal of a cell ahead of the click. The interactive
+  // reveal then adopts the state as-is instead of searching again.
+  prepareNext(cell: Cell | null): void {
+    if (cell === null) {
+      this.prepared = null;
+      return;
+    }
+    if (this.hasPrepared(cell.x, cell.y)) return;
+    const board = this.buildPrepared(cell);
+    this.prepared =
+      board === null
+        ? null
+        : { x: cell.x, y: cell.y, version: this.stateVersion, board };
+  }
+
+  private adoptsPrepared(
+    prepared: PreparedReveal | null,
+    x: number,
+    y: number,
+  ): prepared is PreparedReveal {
+    return (
+      prepared !== null &&
+      prepared.x === x &&
+      prepared.y === y &&
+      prepared.version === this.stateVersion
+    );
+  }
+
+  private buildPrepared(cell: Cell): Board | null {
+    if (this.status !== "playing") return null;
+    const key = keyOf(cell.x, cell.y);
+    if (this.revealedMap.has(key) || this.flagSet.has(key)) return null;
+    const clone = this.clone();
+    if (clone.revealedMap.size === 0) clone.pinArea(cell.x, cell.y);
+    const profile = generationProfile(this.density);
+    const outcome = clone.searchReveal(
+      [[cell.x, cell.y]],
+      clone.revealedMap.size === 0,
+      profile.budgetMs * PREPARE_BUDGET_FACTOR,
+    );
+    // why: a candidate the search had to fall back on is not worth
+    // adopting, the click then pays the interactive search as before
+    return outcome === "accepted" ? clone : null;
+  }
+
+  private clone(): Board {
+    const copy = new Board(this.seed, this.density);
+    copyInto(copy.revealedMap, this.revealedMap);
+    copyInto(copy.chunkQuotas, this.chunkQuotas);
+    copyInto(copy.nonces, this.nonces);
+    copySetInto(copy.committed, this.committed);
+    copySetInto(copy.pinnedSafe, this.pinnedSafe);
+    copySetInto(copy.flagSet, this.flagSet);
+    copy.status = this.status;
+    copy.stateVersion = this.stateVersion;
+    return copy;
+  }
+
+  private adoptFrom(source: Board): void {
+    copyInto(this.revealedMap, source.revealedMap);
+    copyInto(this.chunkQuotas, source.chunkQuotas);
+    copyInto(this.nonces, source.nonces);
+    copySetInto(this.committed, source.committed);
+    copySetInto(this.pinnedSafe, source.pinnedSafe);
+    this.lastRevealed = source.lastRevealed;
+    this.lastFlagged = source.lastFlagged;
+    this.explodedAt = null;
+    this.quotaSearchable = false;
+    this.analysis = null;
+    this.stateVersion++;
   }
 
   // Cached per reveal: whether a certain move exists and which hidden
@@ -274,13 +440,19 @@ export class Board {
   // closure runs only in the stuck state that has to be marked
   deductionState(): DeductionState {
     if (this.analysis === null) {
-      if (findSafeCell(this.revealedMap) !== null) {
-        this.analysis = { certainMove: true, guessCells: [] };
+      const hint = findSafeCell(this.revealedMap);
+      if (hint !== null) {
+        this.analysis = {
+          certainMove: true,
+          guessCells: [],
+          hint: parseKey(hint),
+        };
       } else {
         const { safe, mines } = solve(this.revealedMap);
         this.analysis = {
           certainMove: false,
           guessCells: this.ambiguousCells(safe, mines),
+          hint: null,
         };
       }
     }
@@ -350,22 +522,39 @@ export class Board {
     cells: readonly [number, number][],
     deep: boolean,
   ): ClickResult {
-    const opening = this.revealedMap.size === 0;
+    const outcome = this.searchReveal(
+      cells,
+      deep,
+      generationProfile(this.density).budgetMs,
+    );
+    if (outcome === "lost") {
+      this.status = "lost";
+      return "lost";
+    }
+    return "ok";
+  }
+
+  private searchReveal(
+    cells: readonly [number, number][],
+    deep: boolean,
+    budgetMs: number,
+  ): RevealOutcome {
     const profile = generationProfile(this.density);
-    this.quotaSearchable = opening;
+    this.quotaSearchable = this.revealedMap.size === 0;
     const snap = this.snapshot();
-    const deadline = Date.now() + profile.budgetMs;
-    let fastPathTried = false;
-    let pocketChecks = 0;
-    let best: {
-      readonly snap: Snapshot;
-      readonly revealed: [number, number][];
-      readonly score: number;
-    } | null = null;
+    const search: AttemptSearch = {
+      cells,
+      deep,
+      profile,
+      snap,
+      best: null,
+      fastPathTried: false,
+      pocketChecks: 0,
+    };
+    const deadline = Date.now() + budgetMs;
     for (let attempt = 0; attempt < profile.candidates; attempt++) {
       const result = this.attemptReveal(cells);
       if (result.exploded && attempt === 0) {
-        this.status = "lost";
         this.quotaSearchable = false;
         return "lost";
       }
@@ -374,51 +563,67 @@ export class Board {
         this.hasProgress() &&
         this.withinZeroCap(profile, result.revealed)
       ) {
-        const depth = this.playoutDepth(
-          deep ? profile.opening : profile.select,
-        );
-        const required = deep ? profile.opening : profile.select;
-        const reaches = depth >= required;
-        const improves = best === null || depth > best.score;
-        // why: the pocket closure floods and solves the whole board, so it
-        // runs at most once for the fast path and then only for a
-        // candidate that beats the best depth, not for every candidate
-        const worthChecking = (reaches && !fastPathTried) || improves;
-        if (worthChecking && this.pocketsResolved()) {
-          if (reaches) {
-            this.lastRevealed = result.revealed;
-            this.analysis = null;
-            this.lockFreshQuotas(snap);
-            this.quotaSearchable = false;
-            return "ok";
-          }
-          best = {
-            snap: this.snapshot(true),
-            revealed: result.revealed,
-            score: depth,
-          };
+        const decision = this.judgeAttempt(search, result.revealed);
+        if (decision === "accept") {
+          this.lastRevealed = result.revealed;
+          this.commitCandidate(snap);
+          return "accepted";
         }
-        // why: only a checked candidate can be accepted, so capping the
-        // checks per reveal bounds the cost without weakening the
-        // guarantee; the search simply stops finding better candidates
-        if ((reaches && !fastPathTried) || improves) {
-          if (reaches) fastPathTried = true;
-          if (++pocketChecks >= MAX_POCKET_CHECKS) break;
-        }
+        if (decision === "exhausted") break;
       }
       this.rollbackAndReroll(snap);
       if (Date.now() > deadline) break;
     }
+    return this.finishSearch(search);
+  }
+
+  private judgeAttempt(
+    search: AttemptSearch,
+    revealed: readonly [number, number][],
+  ): "accept" | "skip" | "exhausted" {
+    const { deep, profile } = search;
+    const required = deep ? profile.opening : profile.select;
+    const depth = this.playoutDepth(required);
+    const reaches = depth >= required;
+    const improves = search.best === null || depth > search.best.score;
+    const worthChecking = (reaches && !search.fastPathTried) || improves;
+    if (!worthChecking) return "skip";
+    // why: the pocket closure floods and solves the whole board, so it
+    // runs at most once for the fast path and then only for a candidate
+    // that beats the best depth, not for every candidate
+    if (this.pocketsResolved()) {
+      if (reaches) return "accept";
+      search.best = {
+        snap: this.snapshot(true),
+        revealed: [...revealed] as [number, number][],
+        score: depth,
+      };
+    }
+    if (reaches) search.fastPathTried = true;
+    // why: only a checked candidate can be accepted, so capping the
+    // checks per reveal bounds the cost without weakening the guarantee;
+    // the search simply stops finding better candidates
+    if (++search.pocketChecks >= MAX_POCKET_CHECKS) return "exhausted";
+    return "skip";
+  }
+
+  private commitCandidate(snap: Snapshot): void {
+    this.analysis = null;
+    // why: the candidate's counts were computed while the quotas were
+    // still searchable, so they freeze under the same value before the
+    // flag clears
+    this.lockFreshQuotas(snap);
+    this.quotaSearchable = false;
+    this.stateVersion++;
+  }
+
+  private finishSearch(search: AttemptSearch): RevealOutcome {
+    const { best, cells, snap } = search;
     if (best !== null) {
       this.restore(best.snap, true);
       this.lastRevealed = best.revealed;
-      this.analysis = null;
-      // why: the candidate's counts were computed while the quotas were
-      // still searchable, so they freeze under the same value before the
-      // flag clears
-      this.lockFreshQuotas(snap);
-      this.quotaSearchable = false;
-      return "ok";
+      this.commitCandidate(snap);
+      return "accepted";
     }
     // why: re-rolling cannot repair an ambiguity that already-committed
     // chunks created, so the honest layout stands and the ambiguous cells
@@ -427,7 +632,9 @@ export class Board {
     this.quotaSearchable = false;
     const result = this.attemptReveal(cells);
     this.lockFreshQuotas(snap);
-    return result.exploded ? this.lose() : "ok";
+    if (result.exploded) return "lost";
+    this.stateVersion++;
+    return "committed";
   }
 
   // why: one solve answers every pocket at once, because a pocket's
@@ -505,11 +712,6 @@ export class Board {
       if (this.attemptReveal([[x, y]]).exploded) return false;
     }
     return true;
-  }
-
-  private lose(): ClickResult {
-    this.status = "lost";
-    return "lost";
   }
 
   private attemptReveal(cells: readonly [number, number][]): {

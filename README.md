@@ -115,18 +115,26 @@ only custom boards and "evil" no-guess modes like minesweeper.online's
    game starts on terrain that stays solvable well past the first moves.
    Generation can take up to about a second on Insane, so a "Generating
    board..." indicator paints first and the run clock stops while it runs.
-5. A candidate is accepted only when the position it produces holds at
+5. The next reveal is searched ahead of the click. After every reveal the
+   game asks the board for its next target - the certain move, or the free
+   cell of a marked zone - and searches that reveal while the browser is
+   idle, with twice the interactive budget. A click that lands on the
+   prepared cell adopts the searched state directly: no indicator, no
+   waiting, and the search happens while the player reads the board rather
+   than while they wait on it. Any click still works; a click somewhere
+   else simply pays the interactive search as before.
+6. A candidate is accepted only when the position it produces holds at
    least one provably safe cell and every enclosed pocket of hidden cells
    the reveal created is fully deducible. If either check fails, the
    freshly committed chunks re-roll.
-6. When re-rolling cannot repair ambiguity that already-committed terrain
+7. When re-rolling cannot repair ambiguity that already-committed terrain
    created, the honest layout stands and the ambiguous cells are
    **marked**: the HUD shows "Guess zone: N cells", those cells carry a
    dot on the sheet. You then have two honest options - open one Free
    cell (a real cell of the fixed layout that the board knows is not a
    mine) or take your chances guessing. The board never guesses for you
    and never opens cells you did not click.
-7. Hint runs the same solver and highlights its next certain move.
+8. Hint runs the same solver and highlights its next certain move.
 
 The solver propagates per-cell mine bounds (lower and upper) across the
 whole frontier until they stop tightening, then enumerates small

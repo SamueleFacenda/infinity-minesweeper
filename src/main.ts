@@ -19,6 +19,11 @@ import type { ThemeName } from "./theme.js";
 const DRAG_THRESHOLD_PX = 4;
 const ZOOM_STEP = 1.02;
 const LOSS_OVERLAY_DELAY_MS = 2000;
+// why: the precompute runs in idle slices, so a slice has to fit inside a
+// frame with room for the frame to paint; the reserve keeps the ripple
+// moving while the search advances
+const PREPARE_SLICE_MS = 12;
+const PREPARE_RESERVE_MS = 4;
 // why: browsers "should" not fire synthetic mouse events after a
 // canceled touchend (W3C touch events), but the guard is cheap insurance
 const MOUSE_SUPPRESS_AFTER_TOUCH_MS = 250;
@@ -68,6 +73,7 @@ class Game {
   private touchActive = false;
   private pinchLast: { distance: number; x: number; y: number } | null = null;
   private lastTouchAt = 0;
+  private prepareHandle: number | null = null;
   private flagFirst: boolean;
   private theme: ThemeName;
   private accent: string;
@@ -365,6 +371,7 @@ class Game {
     this.renderer.hintCell = null;
     this.updateStats();
     this.renderer.requestDraw();
+    this.schedulePrepare();
   }
 
   private onTouchStart(event: TouchEvent): void {
@@ -548,7 +555,19 @@ class Game {
 
   private clickCell(cell: Cell): void {
     if (this.board.status !== "playing") return;
+    if (this.board.hasPrepared(cell.x, cell.y)) {
+      this.revealPrepared(cell);
+      return;
+    }
     void this.runReveal(cell);
+  }
+
+  // why: the reveal of this cell is already searched, so the click pays no
+  // generation time and no indicator paints
+  private revealPrepared(cell: Cell): void {
+    const result = this.board.reveal(cell.x, cell.y);
+    this.renderer.hintCell = null;
+    this.applyResult(result, cell);
   }
 
   private applyResult(result: ClickResult, origin: Cell): void {
@@ -570,6 +589,37 @@ class Game {
       playLossSound();
       this.scheduleLossOverlay();
     }
+    this.schedulePrepare();
+  }
+
+  // why: the next reveal is searched while the browser is idle, so the
+  // click that follows it lands without the generating indicator; a click
+  // that misses the prepared cell pays the interactive search as before.
+  // Each slice is bounded so the search never spends a whole frame on the
+  // main thread, which would stall the reveal ripple.
+  private schedulePrepare(): void {
+    if (this.prepareHandle !== null) return;
+    const target = this.board.nextRevealTarget();
+    this.board.prepareNext(target);
+    if (!this.board.hasPendingPrepare()) return;
+    const prepare = (deadline?: IdleDeadline): void => {
+      this.prepareHandle = null;
+      const remaining =
+        deadline === undefined ? PREPARE_SLICE_MS : deadline.timeRemaining();
+      this.board.advancePrepare(
+        performance.now() +
+          Math.max(
+            1,
+            Math.min(remaining - PREPARE_RESERVE_MS, PREPARE_SLICE_MS),
+          ),
+      );
+      if (this.board.hasPendingPrepare()) this.schedulePrepare();
+    };
+    const idle = typeof window.requestIdleCallback;
+    this.prepareHandle =
+      idle === "function"
+        ? window.requestIdleCallback(prepare)
+        : window.setTimeout(prepare, 0);
   }
 
   // why: the un-blurred board (ring, mines, wrong flags) stays visible
@@ -642,6 +692,15 @@ class Game {
 
   private onFreeCell(): void {
     if (this.board.status !== "playing") return;
+    const target = this.board.zoneFreeTarget();
+    if (target !== null && this.board.hasPrepared(target.x, target.y)) {
+      const cell = this.board.freeCell();
+      if (cell !== null) {
+        this.renderer.hintCell = null;
+        this.applyResult("ok", cell);
+        return;
+      }
+    }
     // why: the free cell also waits for the reveal search, so it shows the
     // indicator like any other reveal
     void this.runFreeCell();

@@ -26,9 +26,13 @@ const QUOTA_AMPLITUDE = 1;
 // islands and dense walls, which reads as a grid from above and triples the
 // cascades. The floor keeps every chunk above this fraction of the nominal
 // density, so no empty islands remain to walk through
-// why: the floor tightens with difficulty, so the hardest tiers keep no
-// sparse stretches at all while the easy ones keep their cascades; a floor
-// of one leaves the quota uniform for tiers that never stalled
+// why: the floor must stay low enough that sparse stretches survive on the
+// deep tiers, because a frontier where every chunk sits at the nominal
+// density is uniformly ambiguous: measured over 8 seeds and 400 guided
+// reveals, a floor near one at the Insane tier marks a guess zone within
+// the first hundred cells, while this floor pushes the first zone past the
+// hundredth cell and cuts the zones per run by roughly three times without
+// moving the settled mine fraction off the tier
 const QUOTA_FLOORS: readonly {
   readonly maxDensity: number;
   readonly floor: number;
@@ -36,9 +40,9 @@ const QUOTA_FLOORS: readonly {
   { maxDensity: 0.15, floor: 1 },
   { maxDensity: 0.19, floor: 1 },
   { maxDensity: 0.27, floor: 1 },
-  { maxDensity: 0.32, floor: 0.8 },
-  { maxDensity: 0.37, floor: 0.85 },
-  { maxDensity: Number.POSITIVE_INFINITY, floor: 0.9 },
+  { maxDensity: 0.32, floor: 0.6 },
+  { maxDensity: 0.37, floor: 0.6 },
+  { maxDensity: Number.POSITIVE_INFINITY, floor: 0.6 },
 ];
 
 export function quotaFloorFor(density: number): number {

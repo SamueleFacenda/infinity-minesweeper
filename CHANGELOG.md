@@ -7,13 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Reveal precompute: the next reveal is searched while the browser is idle (twice the interactive budget) and adopted in O(1) by the click that lands on it, so a prepared click paints instantly with no "Generating board..." indicator and no search on the click path; a click that misses the prepared cell falls back to the interactive search unchanged
+
 ### Fixed
 
 - Bottom-of-screen glitch when the guess-zone counter appears: the HUD reflows to a second line, shrinking the canvas CSS box with no window resize event, so the canvas bitmap outlived its box and the browser squashed the stale frame into it (a bottom strip that kept old cells and a vertically compressed board). The renderer now observes the canvas box with a `ResizeObserver` instead of listening for window resizes, which also covers plain window resizes; the bitmap tracks its box across HUD wrap/unwrap, window resizes and short windows
+- Reveal and flag animations no longer stutter past ~400 cleared cells: the precompute block that used to land inside the reveal ripple (30-80 ms, up to 140 ms at 2000 cells) is gone
+- "keeps a long deterministic chain on every tier" test timeout raised from 300s to 600s — eighteen guided chains at the deep tiers cost minutes of search, and the limit was headroom over a loaded machine, not the expected path
+- `Board.nextRevealTarget()` / `zoneFreeTarget()`: the cell the next reveal should open (the certain move, or the free cell of a marked zone) without revealing it, so the UI can aim the precompute
 
 ### Changed
 
 - Zoom/pan render cost per frame cut by roughly a third: animation lookups return their settled value without building a key when no reveal, corner-collapse or flag animation is pending, hidden cells skip the flag/guess-zone key entirely when no flag animates and no zone is marked, the reveal crossfade sheet rect is skipped at full reveal (it painted at zero alpha), and the number and flag atlases are looked up once per frame instead of once per cell — every revealed tile in a frame shares one lattice size. Rendered output is unchanged
+- Reveal precompute runs in idle slices instead of one block: the reveal search is now resumable (a candidate's deterministic playout can stop between its steps) and each slice is bounded by the idle deadline, so the search never spends a whole frame on the main thread — measured on Insane at ~900 cleared cells, animation frames stay at 16.7 ms p50 / 16.8 ms p95 with a prepared-click rate of 0.81 and a prepared click at 3.3 ms
+- Per-chunk quota floor lowered from 80/85/90% to 60% of the nominal density on the deep tiers: a frontier where every chunk sits at the nominal density is uniformly ambiguous, so sparse stretches must survive past Expert. Measured over 8 seeds and 400 guided reveals per seed: the first guess zone at Insane density moves from the 23rd-208th revealed cell to the 166th-438th, zones per run drop from 176 to 53, and the settled mine fraction stays on the tier
+- The quota floor lives in one table (`QUOTA_FLOORS`) and is covered by tests that assert sparse stretches exist and the settled fraction stays near the nominal density
 
 ## [1.0.0] - 2026-11-06
 

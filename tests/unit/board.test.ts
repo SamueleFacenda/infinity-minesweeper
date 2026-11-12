@@ -28,6 +28,14 @@ function playGuided(board: Board, steps: number): void {
   }
 }
 
+// why: a precompute is a job driven in idle slices, so a test finishes it
+// the way the browser does — one bounded slice per call
+function finishPrepare(board: Board, sliceMs = Number.POSITIVE_INFINITY): void {
+  for (let guard = 0; board.hasPendingPrepare() && guard < 20_000; guard++) {
+    board.advancePrepare(performance.now() + sliceMs);
+  }
+}
+
 describe("board", () => {
   it("opens a safe area on the first click", () => {
     const board = new Board(42, 0.22);
@@ -54,6 +62,7 @@ describe("board", () => {
     expect(hint).not.toBeNull();
     if (hint === null) return;
     board.prepareNext(hint);
+    finishPrepare(board);
     expect(board.hasPrepared(hint.x, hint.y)).toBe(true);
     expect(board.hasPrepared(hint.x + 1, hint.y)).toBe(false);
     const before = board.revealedCount;
@@ -74,6 +83,7 @@ describe("board", () => {
         expect(target).not.toBeNull();
         if (target === null) return;
         board.prepareNext(target);
+        finishPrepare(board);
         expect(board.reveal(target.x, target.y)).toBe("ok");
         expect(board.deductionState().certainMove).toBe(true);
       }
@@ -93,6 +103,50 @@ describe("board", () => {
     expect(board.status).toBe("playing");
   });
 
+  it("drops an interrupted precompute when the board changes", () => {
+    const board = new Board(42, 0.22);
+    board.reveal(0, 0);
+    const target = board.nextRevealTarget();
+    expect(target).not.toBeNull();
+    if (target === null) return;
+    board.prepareNext(target);
+    board.advancePrepare(performance.now() + 0.5);
+    board.toggleFlag(50, 50);
+    expect(board.hasPendingPrepare()).toBe(false);
+    expect(board.hasPrepared(target.x, target.y)).toBe(false);
+    // why: no slice may resurrect a job the board change dropped
+    board.advancePrepare(Number.POSITIVE_INFINITY);
+    expect(board.hasPendingPrepare()).toBe(false);
+    expect(board.hasPrepared(target.x, target.y)).toBe(false);
+    const before = board.revealedCount;
+    expect(board.reveal(target.x, target.y)).toBe("ok");
+    expect(board.revealedCount).toBeGreaterThan(before);
+  });
+
+  it("reaches the same prepared state sliced as it does in one run", () => {
+    // why: the search must not depend on how its wall clock was spent, so
+    // many small slices land on exactly the state one long run produces
+    const sliced = new Board(42, 0.26);
+    sliced.reveal(0, 0);
+    const target = sliced.nextRevealTarget();
+    const whole = new Board(42, 0.26);
+    whole.reveal(0, 0);
+    expect(target).not.toBeNull();
+    if (target === null) return;
+    whole.prepareNext(target);
+    finishPrepare(whole);
+    sliced.prepareNext(target);
+    finishPrepare(sliced, 1);
+    expect(sliced.hasPrepared(target.x, target.y)).toBe(
+      whole.hasPrepared(target.x, target.y),
+    );
+    if (!whole.hasPrepared(target.x, target.y)) return;
+    expect(sliced.reveal(target.x, target.y)).toBe("ok");
+    expect(whole.reveal(target.x, target.y)).toBe("ok");
+    expect([...sliced.revealedView]).toEqual([...whole.revealedView]);
+    expect(sliced.lastRevealed).toEqual(whole.lastRevealed);
+  }, 60_000);
+
   it("precomputes the free cell of a guess zone", () => {
     const board = new Board(104729 + 600, 0.6);
     board.reveal(0, 0);
@@ -100,11 +154,13 @@ describe("board", () => {
     for (let step = 0; step < 120 && target !== null; step++) {
       if (board.deductionState().certainMove) {
         board.prepareNext(target);
+        finishPrepare(board);
         expect(board.reveal(target.x, target.y)).toBe("ok");
       } else {
         // why: a zone reveal usually has no accepted candidate to adopt,
         // so the free cell then pays the interactive search as before
         board.prepareNext(target);
+        finishPrepare(board);
         const freed = board.freeCell();
         expect(freed).toEqual(target);
         expect(board.status).toBe("playing");
@@ -187,7 +243,10 @@ describe("board", () => {
         `${name} median chain ${String(median)} below ${String(floor)}`,
       ).toBeGreaterThanOrEqual(floor);
     }
-  }, 300_000);
+    // why: eighteen full guided chains at the deep tiers cost minutes of
+    // search, so the limit is headroom over a loaded machine, not the
+    // expected path
+  }, 600_000);
 
   it("frees a safe cell from a guess zone and keeps the run going", () => {
     // why: a player who refuses to guess must never be forced to end a

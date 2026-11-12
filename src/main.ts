@@ -19,6 +19,11 @@ import type { ThemeName } from "./theme.js";
 const DRAG_THRESHOLD_PX = 4;
 const ZOOM_STEP = 1.02;
 const LOSS_OVERLAY_DELAY_MS = 2000;
+// why: the precompute runs in idle slices, so a slice has to fit inside a
+// frame with room for the frame to paint; the reserve keeps the ripple
+// moving while the search advances
+const PREPARE_SLICE_MS = 12;
+const PREPARE_RESERVE_MS = 4;
 // why: browsers "should" not fire synthetic mouse events after a
 // canceled touchend (W3C touch events), but the guard is cheap insurance
 const MOUSE_SUPPRESS_AFTER_TOUCH_MS = 250;
@@ -575,14 +580,28 @@ class Game {
 
   // why: the next reveal is searched while the browser is idle, so the
   // click that follows it lands without the generating indicator; a click
-  // that misses the prepared cell pays the interactive search as before
+  // that misses the prepared cell pays the interactive search as before.
+  // Each slice is bounded so the search never spends a whole frame on the
+  // main thread, which would stall the reveal ripple.
   private schedulePrepare(): void {
     if (this.prepareHandle !== null) return;
-    const idle = typeof window.requestIdleCallback;
-    const prepare = (): void => {
+    const target = this.board.nextRevealTarget();
+    this.board.prepareNext(target);
+    if (!this.board.hasPendingPrepare()) return;
+    const prepare = (deadline?: IdleDeadline): void => {
       this.prepareHandle = null;
-      this.board.prepareNext(this.board.nextRevealTarget());
+      const remaining =
+        deadline === undefined ? PREPARE_SLICE_MS : deadline.timeRemaining();
+      this.board.advancePrepare(
+        performance.now() +
+          Math.max(
+            1,
+            Math.min(remaining - PREPARE_RESERVE_MS, PREPARE_SLICE_MS),
+          ),
+      );
+      if (this.board.hasPendingPrepare()) this.schedulePrepare();
     };
+    const idle = typeof window.requestIdleCallback;
     this.prepareHandle =
       idle === "function"
         ? window.requestIdleCallback(prepare)

@@ -125,7 +125,10 @@ only custom boards and "evil" no-guess modes like minesweeper.online's
    prepared cell adopts the searched state directly: no indicator, no
    waiting, and the search happens while the player reads the board rather
    than while they wait on it. Any click still works; a click somewhere
-   else simply pays the interactive search as before.
+   else simply pays the interactive search as before. The search is
+   resumable: it advances in slices of a few milliseconds inside the idle
+   deadline (a candidate's playout can stop between its own steps), so no
+   slice ever spends a frame budget and the reveal ripple stays smooth.
 6. A candidate is accepted only when the position it produces holds at
    least one provably safe cell and every enclosed pocket of hidden cells
    the reveal created is fully deducible. If either check fails, the

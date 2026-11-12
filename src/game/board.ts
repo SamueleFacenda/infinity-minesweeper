@@ -38,14 +38,40 @@ interface BestCandidate {
   readonly score: number;
 }
 
+// A candidate whose deterministic playout is half done: the board holds
+// the playout's own state, so a slice can stop between its steps and the
+// next slice continues from where it stopped.
+interface JudgeState {
+  readonly revealed: [number, number][];
+  readonly before: Snapshot;
+  reached: number;
+}
+
 interface AttemptSearch {
   readonly cells: readonly [number, number][];
   readonly deep: boolean;
   readonly profile: GenerationProfile;
   readonly snap: Snapshot;
+  // why: wall-clock bound of the whole search, so a job driven in slices
+  // can never linger past the budget it was given
+  readonly deadline: number;
+  // why: the point after which judging a candidate stops instead of
+  // spending the slice on it; null for the interactive search, which runs
+  // to completion with no frame to protect
+  limit: number | null;
+  attempt: number;
   best: BestCandidate | null;
   fastPathTried: boolean;
   pocketChecks: number;
+  judge: JudgeState | null;
+}
+
+// A precompute in flight: the clone the search mutates, the search state,
+// and the cell the prepared reveal belongs to.
+interface PendingPrepare {
+  readonly cell: Cell;
+  readonly board: Board;
+  readonly search: AttemptSearch;
 }
 
 // Generation effort per tier. Every reveal re-rolls fresh chunks until
@@ -155,8 +181,6 @@ const MAX_POCKET_CHECKS = 3;
 
 // why: an idle precompute has no player waiting on it, so it can afford a
 // longer search than the interactive one and find a deeper chain
-// shortcut: one synchronous block per reveal (up to twice the tier budget);
-// chunk the search across idle periods if a long idle stall ever matters
 const PREPARE_BUDGET_FACTOR = 2;
 
 function copyInto(
@@ -217,6 +241,7 @@ export class Board {
   // reveal older than the current version is discarded instead of adopted
   private stateVersion = 0;
   private prepared: PreparedReveal | null = null;
+  private pendingPrepare: PendingPrepare | null = null;
 
   constructor(seed: number, density: number) {
     this.seed = seed;
@@ -255,7 +280,7 @@ export class Board {
   toggleFlag(x: number, y: number): void {
     const key = keyOf(x, y);
     if (this.status !== "playing" || this.revealedMap.has(key)) return;
-    this.prepared = null;
+    this.invalidatePrepared();
     if (this.flagSet.has(key)) {
       this.flagSet.delete(key);
     } else {
@@ -267,7 +292,7 @@ export class Board {
   reveal(x: number, y: number): ClickResult {
     if (this.status !== "playing") return "ok";
     const prepared = this.prepared;
-    this.prepared = null;
+    this.invalidatePrepared();
     this.lastRevealed = [];
     this.lastFlagged = [];
     const key = keyOf(x, y);
@@ -285,7 +310,7 @@ export class Board {
   // all mines by simple counting.
   clickNumber(x: number, y: number): ClickResult {
     if (this.status !== "playing") return "ok";
-    this.prepared = null;
+    this.invalidatePrepared();
     this.lastRevealed = [];
     this.lastFlagged = [];
     const count = this.revealedMap.get(keyOf(x, y));
@@ -341,7 +366,7 @@ export class Board {
     const target = this.zoneFreeTarget();
     if (target === null) return null;
     const prepared = this.prepared;
-    this.prepared = null;
+    this.invalidatePrepared();
     if (this.adoptsPrepared(prepared, target.x, target.y)) {
       this.adoptFrom(prepared.board);
       return target;
@@ -361,19 +386,78 @@ export class Board {
     );
   }
 
+  // why: the search runs in idle slices, so the caller keeps rescheduling
+  // while a job is in flight; the variant with a cell answers whether the
+  // cell already has a job, without coordinates any job counts
+  hasPendingPrepare(x?: number, y?: number): boolean {
+    const job = this.pendingPrepare;
+    if (job === null) return false;
+    if (x === undefined || y === undefined) return true;
+    return job.cell.x === x && job.cell.y === y;
+  }
+
   // Searches the reveal of a cell ahead of the click. The interactive
   // reveal then adopts the state as-is instead of searching again.
   prepareNext(cell: Cell | null): void {
     if (cell === null) {
-      this.prepared = null;
+      this.invalidatePrepared();
       return;
     }
     if (this.hasPrepared(cell.x, cell.y)) return;
-    const board = this.buildPrepared(cell);
+    if (this.hasPendingPrepare(cell.x, cell.y)) return;
+    this.invalidatePrepared();
+    const board = this.clone();
+    if (board.revealedMap.size === 0) board.pinArea(cell.x, cell.y);
+    const budgetMs =
+      generationProfile(this.density).budgetMs * PREPARE_BUDGET_FACTOR;
+    this.pendingPrepare = {
+      cell,
+      board,
+      search: board.beginSearch(
+        [[cell.x, cell.y]],
+        board.revealedMap.size === 0,
+        budgetMs,
+      ),
+    };
+  }
+
+  private pastLimit(limit: number | null): boolean {
+    return limit !== null && performance.now() > limit;
+  }
+
+  // Drives the in-flight precompute until sliceEnd. Each slice is bounded
+  // so a search can never spend a whole frame budget on the main thread.
+  advancePrepare(sliceEnd: number): void {
+    const job = this.pendingPrepare;
+    if (job === null) return;
+    job.search.limit = sliceEnd;
+    while (performance.now() < sliceEnd) {
+      const outcome = job.board.stepSearch(job.search);
+      if (outcome !== null) {
+        this.resolvePrepare(job, outcome);
+        return;
+      }
+    }
+    // why: the slice ended before the search noticed its own deadline, so a
+    // job out of budget finishes at once instead of lingering forever
+    if (Date.now() > job.search.deadline) {
+      this.resolvePrepare(job, job.board.finishSearch(job.search));
+    }
+  }
+
+  private resolvePrepare(job: PendingPrepare, outcome: RevealOutcome): void {
+    this.pendingPrepare = null;
+    // why: a candidate the search had to fall back on is not worth
+    // adopting, the click then pays the interactive search as before
     this.prepared =
-      board === null
-        ? null
-        : { x: cell.x, y: cell.y, version: this.stateVersion, board };
+      outcome === "accepted"
+        ? {
+            x: job.cell.x,
+            y: job.cell.y,
+            version: this.stateVersion,
+            board: job.board,
+          }
+        : null;
   }
 
   private adoptsPrepared(
@@ -387,23 +471,6 @@ export class Board {
       prepared.y === y &&
       prepared.version === this.stateVersion
     );
-  }
-
-  private buildPrepared(cell: Cell): Board | null {
-    if (this.status !== "playing") return null;
-    const key = keyOf(cell.x, cell.y);
-    if (this.revealedMap.has(key) || this.flagSet.has(key)) return null;
-    const clone = this.clone();
-    if (clone.revealedMap.size === 0) clone.pinArea(cell.x, cell.y);
-    const profile = generationProfile(this.density);
-    const outcome = clone.searchReveal(
-      [[cell.x, cell.y]],
-      clone.revealedMap.size === 0,
-      profile.budgetMs * PREPARE_BUDGET_FACTOR,
-    );
-    // why: a candidate the search had to fall back on is not worth
-    // adopting, the click then pays the interactive search as before
-    return outcome === "accepted" ? clone : null;
   }
 
   private clone(): Board {
@@ -420,6 +487,7 @@ export class Board {
   }
 
   private adoptFrom(source: Board): void {
+    this.invalidatePrepared();
     copyInto(this.revealedMap, source.revealedMap);
     copyInto(this.chunkQuotas, source.chunkQuotas);
     copyInto(this.nonces, source.nonces);
@@ -431,6 +499,14 @@ export class Board {
     this.quotaSearchable = false;
     this.analysis = null;
     this.stateVersion++;
+  }
+
+  // why: every change of the persisted state drops both the finished
+  // precompute and the in-flight one, so a prepared reveal is either for
+  // the current state or it does not exist
+  private invalidatePrepared(): void {
+    this.prepared = null;
+    this.pendingPrepare = null;
   }
 
   // Cached per reveal: whether a certain move exists and which hidden
@@ -539,60 +615,107 @@ export class Board {
     deep: boolean,
     budgetMs: number,
   ): RevealOutcome {
+    const search = this.beginSearch(cells, deep, budgetMs);
+    for (;;) {
+      const outcome = this.stepSearch(search);
+      if (outcome !== null) return outcome;
+    }
+  }
+
+  private beginSearch(
+    cells: readonly [number, number][],
+    deep: boolean,
+    budgetMs: number,
+    limit: number | null = null,
+  ): AttemptSearch {
     const profile = generationProfile(this.density);
     this.quotaSearchable = this.revealedMap.size === 0;
-    const snap = this.snapshot();
-    const search: AttemptSearch = {
+    return {
       cells,
       deep,
       profile,
-      snap,
+      snap: this.snapshot(),
+      deadline: Date.now() + budgetMs,
+      limit,
+      attempt: 0,
       best: null,
       fastPathTried: false,
       pocketChecks: 0,
+      judge: null,
     };
-    const deadline = Date.now() + budgetMs;
-    for (let attempt = 0; attempt < profile.candidates; attempt++) {
-      const result = this.attemptReveal(cells);
-      if (result.exploded && attempt === 0) {
-        this.quotaSearchable = false;
-        return "lost";
-      }
-      if (
-        !result.exploded &&
-        this.hasProgress() &&
-        this.withinZeroCap(profile, result.revealed)
-      ) {
-        const decision = this.judgeAttempt(search, result.revealed);
-        if (decision === "accept") {
-          this.lastRevealed = result.revealed;
-          this.commitCandidate(snap);
-          return "accepted";
-        }
-        if (decision === "exhausted") break;
-      }
-      this.rollbackAndReroll(snap);
-      if (Date.now() > deadline) break;
+  }
+
+  // One unit of the search. Returns null while the search continues, so an
+  // idle caller can spend a bounded slice of time on it; the interactive
+  // path just loops until a terminal outcome. A dropped slice can land in
+  // the middle of a candidate's playout, which is why the playout is part
+  // of the search state rather than a nested call.
+  private stepSearch(search: AttemptSearch): RevealOutcome | null {
+    const judging = search.judge;
+    if (judging !== null) return this.continueJudge(search, judging);
+    const result = this.attemptReveal(search.cells);
+    if (result.exploded && search.attempt === 0) {
+      this.quotaSearchable = false;
+      return "lost";
     }
-    return this.finishSearch(search);
+    if (
+      !result.exploded &&
+      this.hasProgress() &&
+      this.withinZeroCap(search.profile, result.revealed)
+    ) {
+      search.judge = {
+        revealed: result.revealed,
+        before: this.snapshot(true),
+        reached: 0,
+      };
+      return this.continueJudge(search, search.judge);
+    }
+    return this.afterAttempt(search);
+  }
+
+  // The deterministic playout of a candidate, one step per turn. Returns
+  // null when the slice ran out so the caller can pick the job up later.
+  private continueJudge(
+    search: AttemptSearch,
+    judge: JudgeState,
+  ): RevealOutcome | null {
+    const required = search.deep
+      ? search.profile.opening
+      : search.profile.select;
+    while (judge.reached < required) {
+      if (this.pastLimit(search.limit)) return null;
+      const hint = findSafeCell(this.revealedMap);
+      if (hint === null) break;
+      const { x, y } = parseKey(hint);
+      if (this.attemptReveal([[x, y]]).exploded) break;
+      judge.reached++;
+    }
+    this.restore(judge.before, true);
+    search.judge = null;
+    return this.judgeAttempt(search, judge.revealed, judge.reached);
   }
 
   private judgeAttempt(
     search: AttemptSearch,
     revealed: readonly [number, number][],
-  ): "accept" | "skip" | "exhausted" {
+    depth: number,
+  ): RevealOutcome | null {
     const { deep, profile } = search;
     const required = deep ? profile.opening : profile.select;
-    const depth = this.playoutDepth(required);
     const reaches = depth >= required;
     const improves = search.best === null || depth > search.best.score;
     const worthChecking = (reaches && !search.fastPathTried) || improves;
-    if (!worthChecking) return "skip";
+    if (!worthChecking) return this.afterAttempt(search);
+    if (this.pastLimit(search.limit)) return null;
     // why: the pocket closure floods and solves the whole board, so it
     // runs at most once for the fast path and then only for a candidate
     // that beats the best depth, not for every candidate
     if (this.pocketsResolved()) {
-      if (reaches) return "accept";
+      if (reaches) {
+        this.lastRevealed = [...revealed] as [number, number][];
+        this.commitCandidate(search.snap);
+        return "accepted";
+      }
       search.best = {
         snap: this.snapshot(true),
         revealed: [...revealed] as [number, number][],
@@ -603,8 +726,22 @@ export class Board {
     // why: only a checked candidate can be accepted, so capping the
     // checks per reveal bounds the cost without weakening the guarantee;
     // the search simply stops finding better candidates
-    if (++search.pocketChecks >= MAX_POCKET_CHECKS) return "exhausted";
-    return "skip";
+    if (++search.pocketChecks >= MAX_POCKET_CHECKS) {
+      return this.finishSearch(search);
+    }
+    return this.afterAttempt(search);
+  }
+
+  // Between two attempts of the same reveal: re-roll the fresh chunks and
+  // report whether the search still has attempts or budget left.
+  private afterAttempt(search: AttemptSearch): RevealOutcome | null {
+    this.rollbackAndReroll(search.snap);
+    search.attempt++;
+    if (Date.now() > search.deadline) return this.finishSearch(search);
+    if (search.attempt >= search.profile.candidates) {
+      return this.finishSearch(search);
+    }
+    return null;
   }
 
   private commitCandidate(snap: Snapshot): void {
@@ -685,33 +822,6 @@ export class Board {
         ),
       );
     }
-  }
-
-  // why: the playout runs on the real board (cascade counts included), so
-  // its mutated state is discarded by restoring the snapshot it started
-  // from; the reached depth is the fitness the search ranks candidates by,
-  // and lastRevealed is restored by the caller
-  private playoutDepth(depth: number): number {
-    const before = this.snapshot(true);
-    let reached = 0;
-    for (; reached < depth; reached++) {
-      const hint = findSafeCell(this.revealedMap);
-      if (hint === null) break;
-      const { x, y } = parseKey(hint);
-      if (this.attemptReveal([[x, y]]).exploded) break;
-    }
-    this.restore(before, true);
-    return reached;
-  }
-
-  private playoutSolvable(depth: number): boolean {
-    for (let step = 0; step < depth; step++) {
-      const hint = findSafeCell(this.revealedMap);
-      if (hint === null) return false;
-      const { x, y } = parseKey(hint);
-      if (this.attemptReveal([[x, y]]).exploded) return false;
-    }
-    return true;
   }
 
   private attemptReveal(cells: readonly [number, number][]): {

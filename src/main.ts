@@ -12,7 +12,12 @@ import type { RunRecord } from "./game/leaderboard.js";
 import { Leaderboard } from "./game/leaderboard.js";
 import { randomTaunt } from "./game/taunts.js";
 import { Renderer } from "./render.js";
-import { playFlagSound, playLossSound, playRevealSound } from "./sound.js";
+import {
+  playFlagSound,
+  playFreeCellSound,
+  playLossSound,
+  playRevealSound,
+} from "./sound.js";
 import { ACCENTS, applyTheme, loadThemeSettings } from "./theme.js";
 import type { ThemeName } from "./theme.js";
 
@@ -698,6 +703,8 @@ class Game {
       if (cell !== null) {
         this.renderer.hintCell = null;
         this.applyResult("ok", cell);
+        this.renderer.animateFreeCell(cell);
+        playFreeCellSound();
         return;
       }
     }
@@ -719,6 +726,8 @@ class Game {
     }
     this.renderer.hintCell = null;
     this.applyResult("ok", cell);
+    this.renderer.animateFreeCell(cell);
+    playFreeCellSound();
   }
 
   private freeCellRefusal(): string {

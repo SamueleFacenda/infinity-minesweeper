@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Board } from "../../src/game/board.js";
-import { keyOf } from "../../src/game/coords.js";
+import { type Cell, keyOf } from "../../src/game/coords.js";
 import {
   DIFFICULTIES,
   FASTEST_TARGET_TILES,
@@ -280,6 +280,26 @@ describe("board", () => {
     expect(board.freeCell()).toBeNull();
     expect(board.revealedCount).toBeGreaterThan(0);
   });
+
+  it("leaves no stale flag batch for the reveal after a free cell", () => {
+    // why: applyResult plays lastFlagged on every commit, so a batch left
+    // over from an earlier chord replays as a flag raise on a free cell
+    const staleBatch: readonly (readonly [number, number])[] = [[0, 0]];
+    const board = new Board(104729 + 600, 0.6);
+    board.reveal(0, 0);
+    let cell: Cell | null = null;
+    for (let step = 0; step < 120 && cell === null; step++) {
+      const hint = board.findHint();
+      if (hint !== null) {
+        expect(board.reveal(hint.x, hint.y)).toBe("ok");
+        continue;
+      }
+      board.lastFlagged = staleBatch;
+      cell = board.freeCell();
+    }
+    expect(cell).not.toBeNull();
+    expect(board.lastFlagged).toEqual([]);
+  }, 300_000);
 
   it("never opens cells the click did not reach", () => {
     // why: a rescue pin must never reveal a disconnected mine-free patch as

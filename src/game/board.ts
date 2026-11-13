@@ -363,6 +363,7 @@ export class Board {
 
   freeCell(): Cell | null {
     if (this.status !== "playing") return null;
+    this.lastFlagged = [];
     const target = this.zoneFreeTarget();
     if (target === null) return null;
     const prepared = this.prepared;

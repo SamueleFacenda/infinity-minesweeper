@@ -9,10 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Free-cell indicator: revealing a free cell (F) grows a ring from the cell's true position and plays a short cue, so a far-off cell shows an arc sweeping in from where it lies — the flatter the arc, the further away the cell — with a chevron on the edge it hides behind pointing the way to pan; the ring lasts two seconds and grows past a visible cell to a few cell widths
 - Reveal precompute: the next reveal is searched while the browser is idle (twice the interactive budget) and adopted in O(1) by the click that lands on it, so a prepared click paints instantly with no "Generating board..." indicator and no search on the click path; a click that misses the prepared cell falls back to the interactive search unchanged
 
 ### Fixed
 
+- Free cell (F) replayed the flag raise of an earlier chord: the auto-flag batch the renderer plays on every reveal was never reset by the free-cell path, so flags placed long before rose and clicked again when the free cell opened; it now clears like every other reveal path
 - Bottom-of-screen glitch when the guess-zone counter appears: the HUD reflows to a second line, shrinking the canvas CSS box with no window resize event, so the canvas bitmap outlived its box and the browser squashed the stale frame into it (a bottom strip that kept old cells and a vertically compressed board). The renderer now observes the canvas box with a `ResizeObserver` instead of listening for window resizes, which also covers plain window resizes; the bitmap tracks its box across HUD wrap/unwrap, window resizes and short windows
 - Reveal and flag animations no longer stutter past ~400 cleared cells: the precompute block that used to land inside the reveal ripple (30-80 ms, up to 140 ms at 2000 cells) is gone
 - "keeps a long deterministic chain on every tier" test timeout raised from 300s to 600s — eighteen guided chains at the deep tiers cost minutes of search, and the limit was headroom over a loaded machine, not the expected path

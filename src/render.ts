@@ -43,6 +43,11 @@ const REVEAL_DURATION_MS = 300;
 const REVEAL_STAGGER_MS = 50;
 const FLAG_ANIMATION_MS = 260;
 const LOSS_RING_MS = 1200;
+const FREE_CELL_RING_MS = 2000;
+const FREE_CELL_RING_INSET = 24;
+const FREE_CELL_RING_START_RATIO = 0.4;
+const FREE_CELL_RING_ON_SCREEN_REACH = 3.5;
+const FREE_CELL_RING_APPROACH_SHARE = 0.15;
 // why: a cell's count is the number of adjacent mines, capped at the eight
 // neighbors; the glyph atlas holds one slot per possible count
 const MAX_ADJACENT_MINES = 8;
@@ -155,6 +160,35 @@ interface LossAnimation {
   readonly startTime: number;
 }
 
+interface FreeCellRing {
+  readonly cell: Cell;
+  readonly startTime: number;
+}
+
+export interface RingViewport {
+  readonly cameraX: number;
+  readonly cameraY: number;
+  readonly cellSize: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface RingAnchor {
+  // ring center in screen pixels — the cell's true position, which sits
+  // outside the viewport when the cell is off screen
+  readonly x: number;
+  readonly y: number;
+  readonly inside: boolean;
+  // radius that touches the viewport edge and the radius that crosses it
+  readonly arrival: number;
+  readonly reach: number;
+  // chevron anchor, kept inside the viewport edge so the arrow stays visible
+  readonly edgeX: number;
+  readonly edgeY: number;
+  readonly dirX: number;
+  readonly dirY: number;
+}
+
 interface FlagRaiseState {
   readonly pole: number;
   readonly pennant: number;
@@ -231,6 +265,7 @@ export class Renderer {
   private latticeStarted = false;
   private latticeTime = 0;
   private lossAnim: LossAnimation | null = null;
+  private freeCellRing: FreeCellRing | null = null;
   private animFrame: number | null = null;
   private drawPending = false;
   private mineSprite: MineSprite | null = null;
@@ -262,6 +297,7 @@ export class Renderer {
     this.cornerCollapses.clear();
     this.flagAnims.clear();
     this.lossAnim = null;
+    this.freeCellRing = null;
   }
 
   resize(): void {
@@ -327,6 +363,7 @@ export class Renderer {
     // slice through a bite's legs
     this.flushConcaveCorners();
     this.drawLossRing();
+    this.drawFreeCellRing();
   }
 
   animateReveal(cells: readonly (readonly [number, number])[], origin: Cell) {
@@ -377,6 +414,14 @@ export class Renderer {
   animateLoss(cell: Cell) {
     if (this.reducedMotion) return;
     this.lossAnim = { cell, startTime: performance.now() };
+    this.scheduleAnimationFrame();
+  }
+
+  // why: the free cell can open far from the viewport, so its ring marks
+  // the cell itself when visible and the edge it hides behind when not
+  animateFreeCell(cell: Cell) {
+    if (this.reducedMotion) return;
+    this.freeCellRing = { cell, startTime: performance.now() };
     this.scheduleAnimationFrame();
   }
 
@@ -439,7 +484,8 @@ export class Renderer {
     const hadAnimations =
       this.revealAnims.size > 0 ||
       this.flagAnims.size > 0 ||
-      this.lossAnim !== null;
+      this.lossAnim !== null ||
+      this.freeCellRing !== null;
     const animationsActive = this.pruneAnimations(now);
     // why: the frame that prunes the last animation must still draw —
     // otherwise the canvas keeps the previous mid-animation frame frozen
@@ -480,10 +526,17 @@ export class Renderer {
     ) {
       this.lossAnim = null;
     }
+    if (
+      this.freeCellRing !== null &&
+      now - this.freeCellRing.startTime >= FREE_CELL_RING_MS
+    ) {
+      this.freeCellRing = null;
+    }
     return (
       this.revealAnims.size > 0 ||
       this.flagAnims.size > 0 ||
-      this.lossAnim !== null
+      this.lossAnim !== null ||
+      this.freeCellRing !== null
     );
   }
 
@@ -1335,6 +1388,126 @@ export class Renderer {
     this.ctx.stroke();
     this.ctx.globalAlpha = 1;
   }
+
+  private drawFreeCellRing(): void {
+    const anim = this.freeCellRing;
+    if (anim === null) return;
+    const t = (performance.now() - anim.startTime) / FREE_CELL_RING_MS;
+    if (t >= 1) {
+      this.freeCellRing = null;
+      return;
+    }
+    const anchor = freeCellRingPoint(anim.cell, {
+      cameraX: this.cameraX,
+      cameraY: this.cameraY,
+      cellSize: this.cellSize,
+      width: this.canvas.clientWidth,
+      height: this.canvas.clientHeight,
+    });
+    this.ctx.globalAlpha = 0.75 * (1 - t);
+    this.ctx.strokeStyle = canvasPalette().hint;
+    this.ctx.lineWidth = 2 + 3 * (1 - t);
+    this.ctx.beginPath();
+    this.ctx.arc(
+      anchor.x,
+      anchor.y,
+      freeCellRingRadius(t, anchor, this.cellSize),
+      0,
+      Math.PI * 2,
+    );
+    this.ctx.stroke();
+    if (!anchor.inside) this.drawFreeCellChevron(anchor);
+    this.ctx.globalAlpha = 1;
+  }
+
+  // why: the ring that finally sweeps the screen shows how far away the cell
+  // was — the flatter the arc, the further off it started; the chevron at the
+  // edge keeps the direction readable while the arc is still crossing
+  private drawFreeCellChevron(anchor: RingAnchor): void {
+    const size = this.cellSize * 0.5;
+    this.ctx.save();
+    this.ctx.translate(anchor.edgeX, anchor.edgeY);
+    this.ctx.rotate(Math.atan2(anchor.dirY, anchor.dirX));
+    this.ctx.fillStyle = canvasPalette().hint;
+    this.ctx.beginPath();
+    this.ctx.moveTo(size, 0);
+    this.ctx.lineTo(-size * 0.6, size * 0.6);
+    this.ctx.lineTo(-size * 0.6, -size * 0.6);
+    this.ctx.closePath();
+    this.ctx.fill();
+    this.ctx.restore();
+  }
+}
+
+// why: the free cell can hide far outside the viewport, so its ring starts at
+// the cell's true position — outside the viewport when it is off screen — and
+// grows until the arc sweeps the viewport; the distance the ring travels
+// before it becomes visible tells the player how far away the cell was
+export function freeCellRingPoint(cell: Cell, view: RingViewport): RingAnchor {
+  const originX = (cell.x - view.cameraX) * view.cellSize + view.width / 2;
+  const originY = (cell.y - view.cameraY) * view.cellSize + view.height / 2;
+  const x = originX + view.cellSize / 2;
+  const y = originY + view.cellSize / 2;
+  const offsetX = x - view.width / 2;
+  const offsetY = y - view.height / 2;
+  const length = Math.hypot(offsetX, offsetY) || 1;
+  const inside = x >= 0 && x <= view.width && y >= 0 && y <= view.height;
+  const inset = Math.max(FREE_CELL_RING_INSET, view.cellSize * 1.5);
+  const arrival = distanceToViewport(x, y, view);
+  // why: a visible cell only needs a ring a few cells wide; an off-screen cell
+  // needs one that reaches from the cell to the far corner of the viewport, so
+  // the arc always crosses the screen no matter how far away the cell is
+  const reach = inside
+    ? view.cellSize * FREE_CELL_RING_ON_SCREEN_REACH
+    : arrival + Math.hypot(view.width, view.height) + view.cellSize;
+  return {
+    x,
+    y,
+    inside,
+    arrival,
+    reach,
+    edgeX: clampToEdge(x, view.width, inset),
+    edgeY: clampToEdge(y, view.height, inset),
+    dirX: offsetX / length,
+    dirY: offsetY / length,
+  };
+}
+
+function distanceToViewport(x: number, y: number, view: RingViewport): number {
+  const beyondX = Math.max(0, -x, x - view.width);
+  const beyondY = Math.max(0, -y, y - view.height);
+  return Math.hypot(beyondX, beyondY);
+}
+
+// why: the ring spends a short share of the animation growing from the cell
+// to the viewport and the rest sweeping across it, so a cell a hundred cells
+// away shows its arc for most of the animation instead of flashing in at the
+// very end; the segment where the arc enters the viewport reads as distance
+export function freeCellRingRadius(
+  t: number,
+  anchor: RingAnchor,
+  cellSize: number,
+): number {
+  const start = cellSize * FREE_CELL_RING_START_RATIO;
+  if (anchor.inside) {
+    return start + (anchor.reach - start) * easeOutCubic(t);
+  }
+  const approach = FREE_CELL_RING_APPROACH_SHARE;
+  if (t < approach) {
+    return start + (anchor.arrival - start) * easeOutCubic(t / approach);
+  }
+  const swept = (t - approach) / (1 - approach);
+  return anchor.arrival + (anchor.reach - anchor.arrival) * easeOutCubic(swept);
+}
+
+// why: an axis shorter than the inset has no edge to sit against, so the
+// anchor collapses to the middle of that axis instead of sliding past it
+function clampToEdge(value: number, extent: number, inset: number): number {
+  const middle = extent / 2;
+  return Math.min(
+    Math.max(value, Math.min(inset, middle)),
+    Math.max(extent - inset, middle),
+  );
 }
 
 function hasConcaveCorner(terrain: TileTerrain): boolean {

@@ -154,6 +154,14 @@ export function playRevealSound(cellCount: number): void {
   }
 }
 
+// why: the free cell is a rescue, not terrain being uncovered — a rising
+// glide tells it apart from the reveal crunch and the flag thunk
+export function playFreeCellSound(): void {
+  const context = getContext();
+  if (!context) return;
+  playTone(context, "sine", 500, 900, 150, 0.18);
+}
+
 export function playLossSound(): void {
   const context = getContext();
   if (!context) return;

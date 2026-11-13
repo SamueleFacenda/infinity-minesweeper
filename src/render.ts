@@ -53,7 +53,7 @@ const FREE_CELL_RING_APPROACH_SHARE = 0.15;
 const MAX_ADJACENT_MINES = 8;
 
 interface RevealAnimation {
-  readonly startTime: number;
+  startTime: number;
   readonly delay: number;
 }
 
@@ -150,14 +150,28 @@ export function glideStep(
   return [target + moved, next];
 }
 
+// why: every animation runs against a wall clock, so a frame that arrives
+// arbitrarily late — an idle precompute slice, a backgrounded tab — would
+// expire a whole reveal before a single frame painted it; the missed time
+// pauses the pending animations instead and the ripple continues from the
+// frame that was last painted
+export function pauseAnimations<T extends { startTime: number }>(
+  frozenMs: number,
+  anims: Map<string, T>,
+): void {
+  for (const anim of anims.values()) {
+    anim.startTime += frozenMs;
+  }
+}
+
 interface FlagAnimation {
   readonly placing: boolean;
-  readonly startTime: number;
+  startTime: number;
 }
 
 interface LossAnimation {
   readonly cell: Cell;
-  readonly startTime: number;
+  startTime: number;
 }
 
 interface FreeCellRing {
@@ -268,6 +282,7 @@ export class Renderer {
   private freeCellRing: FreeCellRing | null = null;
   private animFrame: number | null = null;
   private drawPending = false;
+  private frameClock = 0;
   private mineSprite: MineSprite | null = null;
   private numberSprite: NumberSprite | null = null;
   private flagSprite: FlagSprite | null = null;
@@ -473,6 +488,9 @@ export class Renderer {
 
   private scheduleAnimationFrame(): void {
     if (this.animFrame !== null) return;
+    // why: the frame clock starts when a frame is scheduled, so a click
+    // after a long idle does not count that idle as one missed frame
+    this.frameClock = performance.now();
     this.animFrame = requestAnimationFrame(() => {
       this.onAnimationFrame();
     });
@@ -481,6 +499,11 @@ export class Renderer {
   private onAnimationFrame(): void {
     this.animFrame = null;
     const now = performance.now();
+    const missedMs = now - this.frameClock;
+    this.frameClock = now;
+    if (missedMs > REVEAL_DURATION_MS) {
+      this.pauseAnimationsForMissedTime(missedMs);
+    }
     const hadAnimations =
       this.revealAnims.size > 0 ||
       this.flagAnims.size > 0 ||
@@ -502,6 +525,13 @@ export class Renderer {
     this.drawPending = false;
     this.draw();
     this.scheduleAnimationFrame();
+  }
+
+  private pauseAnimationsForMissedTime(frozenMs: number): void {
+    pauseAnimations(frozenMs, this.revealAnims);
+    pauseAnimations(frozenMs, this.cornerCollapses);
+    pauseAnimations(frozenMs, this.flagAnims);
+    if (this.lossAnim !== null) this.lossAnim.startTime += frozenMs;
   }
 
   private pruneAnimations(now: number): boolean {

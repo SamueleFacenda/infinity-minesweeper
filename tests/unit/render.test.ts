@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { cornerCollapseRegistrations, glideStep } from "../../src/render.js";
+import {
+  cornerCollapseRegistrations,
+  glideStep,
+  pauseAnimations,
+} from "../../src/render.js";
 
 const START_TIME = 1000;
 
@@ -136,5 +140,46 @@ describe("glideStep", () => {
     [value, velocity] = glideStep(value, velocity, 60, step);
 
     expect(velocity).toBeGreaterThan(first);
+  });
+});
+
+describe("pauseAnimations", () => {
+  const REVEAL_DURATION_MS = 300;
+
+  it("shifts every pending start time by the missed time", () => {
+    const anims = new Map([
+      ["0,0", { startTime: 1000, delay: 0 }],
+      ["0,1", { startTime: 1000, delay: 50 }],
+    ]);
+
+    pauseAnimations(400, anims);
+
+    expect([...anims.values()]).toEqual([
+      { startTime: 1400, delay: 0 },
+      { startTime: 1400, delay: 50 },
+    ]);
+  });
+
+  it("keeps the progress the last painted frame showed", () => {
+    const anims = new Map([["0,0", { startTime: 0, delay: 0 }]]);
+    const revealedAt = 250;
+    const missedMs = 400;
+
+    pauseAnimations(missedMs, anims);
+
+    const now = revealedAt + missedMs;
+    const startTime = anims.get("0,0")?.startTime ?? -1;
+    const progress = (now - startTime) / REVEAL_DURATION_MS;
+
+    expect(progress).toBeCloseTo(revealedAt / REVEAL_DURATION_MS);
+    expect(progress).toBeLessThan(1);
+  });
+
+  it("leaves no animation pending when nothing animates", () => {
+    const anims = new Map<string, { startTime: number; delay: number }>();
+
+    pauseAnimations(400, anims);
+
+    expect(anims.size).toBe(0);
   });
 });

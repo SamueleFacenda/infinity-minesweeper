@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { handleEngineMessage } from "../../src/engine.js";
+import {
+  advancePrepare,
+  handleEngineMessage,
+  startPrepare,
+} from "../../src/engine.js";
 import type {
   EngineReply,
   EngineRequest,
@@ -37,6 +41,19 @@ function stateSnapshot(replies: readonly EngineReply[]): EngineSnapshot {
 
 function preparedReplies(replies: readonly EngineReply[]) {
   return replies.filter((reply) => reply.kind === "prepared");
+}
+
+// why: the transports slice the precompute, so a test that wants the whole
+// search runs startPrepare and advances it the way the worker's timer does
+function drivePrepare(session: EngineSession): readonly EngineReply[] {
+  const replies: EngineReply[] = [];
+  startPrepare(session);
+  let guard = 0;
+  while (session.board?.hasPendingPrepare() === true && guard < 100_000) {
+    replies.push(...advancePrepare(session, GAME_ID));
+    guard += 1;
+  }
+  return replies;
 }
 
 // why: a moved mine under a shown number is the one failure the whole
@@ -95,11 +112,14 @@ function guidedReveals(
     if (board?.status !== "playing") break;
     const hint = board.findHint();
     if (hint === null) break;
-    const replies = send(session, {
-      kind: "reveal",
-      x: hint.x,
-      y: hint.y,
-    });
+    const replies = [
+      ...send(session, {
+        kind: "reveal",
+        x: hint.x,
+        y: hint.y,
+      }),
+      ...drivePrepare(session),
+    ];
     const snapshot = stateSnapshot(replies);
     view.update(snapshot);
     assertCountsConsistent(snapshot, view);
@@ -111,6 +131,21 @@ function guidedReveals(
 }
 
 describe("engine handler", () => {
+  it("answers a reveal without waiting for the precompute", () => {
+    const session: EngineSession = { board: null };
+    send(session, { kind: "new", seed: 7, density: EASY_DENSITY });
+    const board = session.board;
+    if (board === null) throw new Error("session has no board");
+    const replies = send(session, { kind: "reveal", x: 0, y: 0 });
+    const snapshot = stateSnapshot(replies);
+    expect(snapshot.revealed.size).toBeGreaterThan(0);
+    expect(snapshot.lastRevealed.length).toBeGreaterThan(0);
+    // why: the precompute is what used to sit between the reveal and its
+    // answer, which left the player staring at a stale board for up to a
+    // second on the deep tiers; the answer must not carry it
+    expect(board.hasPendingPrepare()).toBe(false);
+  });
+
   it("starts a new board empty and playing", () => {
     const session: EngineSession = { board: null };
     const snapshot = stateSnapshot(

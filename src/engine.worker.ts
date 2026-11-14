@@ -1,4 +1,4 @@
-import { handleEngineMessage } from "./engine.js";
+import { advancePrepare, handleEngineMessage, startPrepare } from "./engine.js";
 import type { EngineMessage, EngineReply, EngineSession } from "./engine.js";
 
 // Dedicated engine thread: one Board owner and no frames to protect, so
@@ -7,6 +7,8 @@ import type { EngineMessage, EngineReply, EngineSession } from "./engine.js";
 // client loads it as a module worker.
 
 const session: EngineSession = { board: null };
+let prepareGameId = 1;
+let prepareTimer: ReturnType<typeof setTimeout> | null = null;
 
 // why: the worker global is not typed by the DOM lib under every
 // compilation setup, so the two members this file needs are declared here
@@ -22,12 +24,15 @@ interface EngineFailure {
 
 scope.onmessage = (event: MessageEvent<EngineMessage>): void => {
   try {
+    const { gameId, requestId } = event.data;
+    prepareGameId = gameId;
     const replies = handleEngineMessage(session, event.data);
-    // why: the request id rides on every message so the client can match
-    // replies and drop the ones a restarted game superseded
-    for (const reply of replies) {
-      scope.postMessage({ requestId: event.data.requestId, ...reply });
-    }
+    for (const reply of replies) scope.postMessage({ requestId, ...reply });
+    // why: the precompute of the next reveal starts only once the answer is
+    // on the wire, so the reveal the player just made reaches the screen
+    // while the next search is still running
+    startPrepare(session);
+    schedulePrepareSlice();
   } catch (error) {
     scope.postMessage({
       requestId: event.data.requestId,
@@ -35,3 +40,14 @@ scope.onmessage = (event: MessageEvent<EngineMessage>): void => {
     });
   }
 };
+
+function schedulePrepareSlice(): void {
+  if (prepareTimer !== null) return;
+  prepareTimer = setTimeout(() => {
+    prepareTimer = null;
+    for (const reply of advancePrepare(session, prepareGameId)) {
+      scope.postMessage(reply);
+    }
+    if (session.board?.hasPendingPrepare() === true) schedulePrepareSlice();
+  }, 0);
+}

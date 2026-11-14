@@ -1,4 +1,4 @@
-import { handleEngineMessage } from "./engine.js";
+import { advancePrepare, handleEngineMessage, startPrepare } from "./engine.js";
 import type {
   EngineMessage,
   EngineReply,
@@ -150,6 +150,7 @@ export class LocalEngineClient implements EngineClient {
   readonly view = new SnapshotView();
   private readonly session: EngineSession = { board: null };
   private gameId = 0;
+  private prepareTimer: ReturnType<typeof setTimeout> | null = null;
   private failureListener: (() => void) | null = null;
   private preparedListener: ((cell: Cell) => void) | null = null;
 
@@ -159,17 +160,14 @@ export class LocalEngineClient implements EngineClient {
       gameId: this.gameId,
       request,
     };
-    const replies = handleEngineMessage(this.session, message);
     let outcome: EngineOutcome | null = null;
-    for (const reply of replies) {
-      if (reply.gameId !== this.gameId) continue;
-      if (reply.kind === "prepared") {
-        this.preparedListener?.({ x: reply.x, y: reply.y });
-        continue;
-      }
-      if (reply.kind === "state") this.view.update(reply.snapshot);
-      outcome = outcomeOf(reply);
+    for (const reply of handleEngineMessage(this.session, message)) {
+      outcome = this.dispatch(reply);
     }
+    // why: the precompute is sliced on a timer here too, so a fallback run
+    // never blocks the main thread on a deep-tier search
+    startPrepare(this.session);
+    this.schedulePrepareSlice();
     return Promise.resolve(outcome);
   }
 
@@ -185,6 +183,29 @@ export class LocalEngineClient implements EngineClient {
 
   onPrepared(listener: (cell: Cell) => void): void {
     this.preparedListener = listener;
+  }
+
+  private dispatch(reply: EngineReply): EngineOutcome | null {
+    if (reply.gameId !== this.gameId) return null;
+    if (reply.kind === "prepared") {
+      this.preparedListener?.({ x: reply.x, y: reply.y });
+      return null;
+    }
+    if (reply.kind === "state") this.view.update(reply.snapshot);
+    return outcomeOf(reply);
+  }
+
+  private schedulePrepareSlice(): void {
+    if (this.prepareTimer !== null) return;
+    this.prepareTimer = setTimeout(() => {
+      this.prepareTimer = null;
+      for (const reply of advancePrepare(this.session, this.gameId)) {
+        this.dispatch(reply);
+      }
+      if (this.session.board?.hasPendingPrepare() === true) {
+        this.schedulePrepareSlice();
+      }
+    }, 0);
   }
 }
 

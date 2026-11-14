@@ -51,6 +51,10 @@ describe("local engine client", () => {
     client.onPrepared((cell) => prepared.push(cell));
     await client.newGame(9, 0.12);
     await client.request({ kind: "reveal", x: 0, y: 0 });
+    const deadline = Date.now() + 5000;
+    while (prepared.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     const first = prepared.at(0);
     if (first === undefined) return;
     expect(client.view.isRevealed(first.x, first.y)).toBe(false);

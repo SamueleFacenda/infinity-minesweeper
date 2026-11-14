@@ -2,6 +2,11 @@ import { Board } from "./game/board.js";
 import type { Cell } from "./game/coords.js";
 import type { EngineSnapshot } from "./game/snapshot.js";
 
+// why: a slice of the precompute is bounded so a request that arrives while
+// the search runs is answered at once instead of waiting for the whole
+// search; off-thread there is no frame to protect, only input latency
+const PREPARE_SLICE_MS = 12;
+
 // The engine runs single-owner inside a worker: it answers requests with
 // snapshots. Every soundness invariant (frozen quotas, nonce-coupled
 // re-rolls) lives inside Board and never crosses the thread boundary —
@@ -59,8 +64,15 @@ export interface EngineMessage {
 
 export interface EngineSession {
   board: Board | null;
+  // why: the cell the in-flight precompute searches, kept so the slice that
+  // finishes it can report the prepared cell
+  prepareCell?: Cell | null;
 }
 
+// The answer to one request. Deliberately free of the precompute: the
+// caller posts this reply before it starts the next prepare search, so the
+// reveal the player just made reaches the screen while the precompute of
+// the next one is still running.
 export function handleEngineMessage(
   session: EngineSession,
   message: EngineMessage,
@@ -69,18 +81,17 @@ export function handleEngineMessage(
   switch (request.kind) {
     case "new": {
       session.board = new Board(request.seed, request.density);
-      const board = requireBoard(session);
-      return [stateReply(board, gameId), ...withPrepare(board, gameId)];
+      return [stateReply(requireBoard(session), gameId)];
     }
     case "reveal": {
       const board = requireBoard(session);
       board.reveal(request.x, request.y);
-      return [stateReply(board, gameId), ...withPrepare(board, gameId)];
+      return [stateReply(board, gameId)];
     }
     case "chord": {
       const board = requireBoard(session);
       board.clickNumber(request.x, request.y);
-      return [stateReply(board, gameId), ...withPrepare(board, gameId)];
+      return [stateReply(board, gameId)];
     }
     case "flag": {
       const board = requireBoard(session);
@@ -93,27 +104,58 @@ export function handleEngineMessage(
       // played
       board.lastRevealed = [];
       board.lastFlagged = [];
-      const reply =
-        placed === wasFlagged
-          ? stateReply(board, gameId)
-          : stateReply(board, gameId, {
+      return placed === wasFlagged
+        ? [stateReply(board, gameId)]
+        : [
+            stateReply(board, gameId, {
               flag: { x: request.x, y: request.y, placed },
-            });
-      return [reply, ...withPrepare(board, gameId)];
+            }),
+          ];
     }
     case "free": {
       const board = requireBoard(session);
       const cell = board.freeCell();
-      return [
-        stateReply(board, gameId, { freeCell: cell }),
-        ...withPrepare(board, gameId),
-      ];
+      return [stateReply(board, gameId, { freeCell: cell })];
     }
     case "hint": {
       const board = requireBoard(session);
       return [{ kind: "hint", gameId, hint: board.findHint() }];
     }
   }
+}
+
+// Starts the precompute of the next reveal target. Costs only a clone and
+// a search setup, so it runs on the reply path itself.
+export function startPrepare(session: EngineSession): void {
+  const board = session.board;
+  if (board === null) return;
+  if (board.hasPendingPrepare()) return;
+  const target = board.nextRevealTarget();
+  if (target === null) {
+    board.prepareNext(null);
+    return;
+  }
+  board.prepareNext(target);
+  session.prepareCell = target;
+}
+
+// One bounded slice of the in-flight precompute, plus the prepared-cell
+// notification when the search just finished. The caller keeps calling
+// while a job is pending.
+export function advancePrepare(
+  session: EngineSession,
+  gameId: number,
+): readonly EngineReply[] {
+  if (session.board?.hasPendingPrepare() !== true) return [];
+  const board = session.board;
+  board.advancePrepare(performance.now() + PREPARE_SLICE_MS);
+  if (board.hasPendingPrepare()) return [];
+  const cell = session.prepareCell;
+  session.prepareCell = null;
+  if (cell === undefined || cell === null) return [];
+  return board.hasPrepared(cell.x, cell.y)
+    ? [{ kind: "prepared", gameId, x: cell.x, y: cell.y }]
+    : [];
 }
 
 function requireBoard(session: EngineSession): Board {
@@ -151,23 +193,4 @@ function snapshotOf(board: Board): EngineSnapshot {
     guessCells: state.guessCells,
     terrain: board.terrainTable(),
   };
-}
-
-// why: the search runs to completion in the worker — there is no frame to
-// protect there — so the idle slicing the main thread needed is gone and
-// the next click on the searched cell adopts the result instead of paying
-// for a second search
-function withPrepare(board: Board, gameId: number): readonly EngineReply[] {
-  const target = board.nextRevealTarget();
-  if (target === null) {
-    board.prepareNext(null);
-    return [];
-  }
-  board.prepareNext(target);
-  if (!board.hasPendingPrepare()) return [];
-  board.advancePrepare(Number.POSITIVE_INFINITY);
-  if (board.hasPendingPrepare()) return [];
-  return board.hasPrepared(target.x, target.y)
-    ? [{ kind: "prepared", gameId, x: target.x, y: target.y }]
-    : [];
 }

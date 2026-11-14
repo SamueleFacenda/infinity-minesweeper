@@ -16,6 +16,13 @@ export type EngineRequest =
   | { readonly kind: "free" }
   | { readonly kind: "hint" };
 
+// the requests a player action produces; "new" is a lifecycle call and
+// "hint" reads without mutating
+export type EngineAction = Extract<
+  EngineRequest,
+  { readonly kind: "reveal" | "chord" | "flag" | "free" }
+>;
+
 export interface FlagPlacement {
   readonly x: number;
   readonly y: number;

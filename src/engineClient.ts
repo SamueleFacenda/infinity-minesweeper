@@ -8,7 +8,7 @@ import type {
 } from "./engine.js";
 import type { Cell } from "./game/coords.js";
 import { SnapshotView } from "./game/snapshot.js";
-import type { BoardView, EngineSnapshot } from "./game/snapshot.js";
+import type { EngineSnapshot } from "./game/snapshot.js";
 
 // Two transports, one protocol. The worker keeps the main thread free
 // while the generation search runs; the local client drives the same
@@ -25,7 +25,7 @@ export type EngineOutcome =
   | { readonly kind: "hint"; readonly hint: Cell | null };
 
 export interface EngineClient {
-  readonly view: BoardView;
+  readonly view: SnapshotView;
   request(request: EngineRequest): Promise<EngineOutcome | null>;
   newGame(seed: number, density: number): Promise<EngineOutcome | null>;
   // why: a worker that fails to load or dies mid-run is reported so the

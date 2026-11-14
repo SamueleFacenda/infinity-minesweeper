@@ -1,5 +1,7 @@
-import type { ClickResult } from "./game/board.js";
-import { Board } from "./game/board.js";
+import { createEngineClient } from "./engineClient.js";
+import type { EngineClient, EngineOutcome } from "./engineClient.js";
+import { LocalEngineClient } from "./engineClient.js";
+import type { EngineAction } from "./engine.js";
 import type { Cell } from "./game/coords.js";
 import { keyOf } from "./game/coords.js";
 import type { Difficulty } from "./game/difficulty.js";
@@ -10,6 +12,7 @@ import {
 } from "./game/difficulty.js";
 import type { RunRecord } from "./game/leaderboard.js";
 import { Leaderboard } from "./game/leaderboard.js";
+import type { EngineSnapshot, SnapshotView } from "./game/snapshot.js";
 import { randomTaunt } from "./game/taunts.js";
 import { Renderer } from "./render.js";
 import {
@@ -24,11 +27,6 @@ import type { ThemeName } from "./theme.js";
 const DRAG_THRESHOLD_PX = 4;
 const ZOOM_STEP = 1.02;
 const LOSS_OVERLAY_DELAY_MS = 2000;
-// why: the precompute runs in idle slices, so a slice has to fit inside a
-// frame with room for the frame to paint; the reserve keeps the ripple
-// moving while the search advances
-const PREPARE_SLICE_MS = 12;
-const PREPARE_RESERVE_MS = 4;
 // why: browsers "should" not fire synthetic mouse events after a
 // canceled touchend (W3C touch events), but the guard is cheap insurance
 const MOUSE_SUPPRESS_AFTER_TOUCH_MS = 250;
@@ -60,8 +58,15 @@ interface Elements {
 }
 
 class Game {
-  private board: Board;
+  private client: EngineClient;
+  private readonly view: SnapshotView;
   private readonly renderer: Renderer;
+  // why: the last snapshot the engine answered with, cached for the HUD
+  private snapshot: EngineSnapshot | null = null;
+  private seed = 0;
+  private busy = false;
+  private fellBack = false;
+  private preparedCell: Cell | null = null;
   private readonly leaderboard = new Leaderboard(window.localStorage);
   private timerStart: number | null = null;
   // why: time the board spent generating, excluded from the run clock
@@ -78,7 +83,6 @@ class Game {
   private touchActive = false;
   private pinchLast: { distance: number; x: number; y: number } | null = null;
   private lastTouchAt = 0;
-  private prepareHandle: number | null = null;
   private flagFirst: boolean;
   private theme: ThemeName;
   private accent: string;
@@ -106,8 +110,14 @@ class Game {
     const settings = loadThemeSettings(window.localStorage);
     this.theme = settings.theme;
     this.accent = settings.accent;
-    this.board = this.newBoard();
-    this.renderer = new Renderer(this.elements.canvas, ctx, this.board);
+    this.client = createEngineClient(() => {
+      this.onEngineFailure();
+    });
+    this.client.onPrepared((cell) => {
+      this.preparedCell = cell;
+    });
+    this.view = this.client.view;
+    this.renderer = new Renderer(this.elements.canvas, ctx, this.view);
     this.flagFirst = settings.flagFirst ?? this.renderer.coarsePointer;
     this.canvasResizeObserver = new ResizeObserver(() => {
       this.onResize();
@@ -121,14 +131,13 @@ class Game {
       this.updateTime();
     }, 500);
     this.renderer.resize();
-    this.renderer.draw();
-    this.updateStats();
+    void this.restart();
   }
 
-  private newBoard(): Board {
+  private newSeed(): number {
     const seedBytes = new Uint32Array(1);
     crypto.getRandomValues(seedBytes);
-    return new Board(seedBytes[0] ?? 0, this.difficulty.density);
+    return seedBytes[0] ?? 0;
   }
 
   private populateDifficulties(): void {
@@ -203,22 +212,22 @@ class Game {
       this.onDifficultyChange();
     });
     this.elements.hint.addEventListener("click", () => {
-      this.onHint();
+      void this.onHint();
     });
     this.elements.free.addEventListener("click", () => {
-      this.onFreeCell();
+      void this.onFreeCell();
     });
     this.elements.leaderboard.addEventListener("click", () => {
       this.showModal();
     });
     this.elements.newGame.addEventListener("click", () => {
-      this.restart();
+      void this.restart();
     });
     this.elements.overlayInspect.addEventListener("click", () => {
       this.hideOverlay();
     });
     this.elements.overlayAction.addEventListener("click", () => {
-      this.restart();
+      void this.restart();
     });
     this.elements.modalClose.addEventListener("click", () => {
       this.hideModal();
@@ -344,12 +353,14 @@ class Game {
   }
 
   private onPrimary(cell: Cell): void {
-    if (this.board.isRevealed(cell.x, cell.y)) this.clickCell(cell);
+    if (this.busy) return;
+    if (this.view.isRevealed(cell.x, cell.y)) this.clickCell(cell);
     else if (this.flagFirst) this.toggleFlagAt(cell);
     else this.clickCell(cell);
   }
 
   private onSecondary(cell: Cell): void {
+    if (this.busy) return;
     if (this.flagFirst) this.clickCell(cell);
     else this.toggleFlagAt(cell);
   }
@@ -365,18 +376,9 @@ class Game {
   }
 
   private toggleFlagAt(cell: Cell): void {
-    if (this.board.status !== "playing") return;
-    const wasFlagged = this.board.isFlagged(cell.x, cell.y);
-    this.board.toggleFlag(cell.x, cell.y);
-    const isFlagged = this.board.isFlagged(cell.x, cell.y);
-    if (isFlagged !== wasFlagged) {
-      this.renderer.animateFlagToggle(cell, isFlagged);
-      playFlagSound(isFlagged);
-    }
-    this.renderer.hintCell = null;
-    this.updateStats();
-    this.renderer.requestDraw();
-    this.schedulePrepare();
+    if (this.busy) return;
+    if (this.view.status !== "playing") return;
+    void this.submit({ kind: "flag", x: cell.x, y: cell.y });
   }
 
   private onTouchStart(event: TouchEvent): void {
@@ -527,15 +529,15 @@ class Game {
         break;
       case "h":
       case "H":
-        this.onHint();
+        void this.onHint();
         return;
       case "f":
       case "F":
-        this.onFreeCell();
+        void this.onFreeCell();
         return;
       case "n":
       case "N":
-        this.restart();
+        void this.restart();
         return;
       default:
         return;
@@ -543,88 +545,108 @@ class Game {
     this.renderer.requestDraw();
   }
 
-  // why: generating can take up to a second on the hardest tier, so the
-  // indicator paints first and the run clock stops while it runs
-  private async runReveal(cell: Cell): Promise<void> {
+  // One round trip to the engine: post the request, keep the run clock
+  // stopped while it answers, then replay the result the way the
+  // synchronous version did.
+  private async submit(request: EngineAction): Promise<EngineOutcome | null> {
+    if (this.busy || this.view.status !== "playing") return null;
+    this.busy = true;
+    const prepared = this.preparedCell;
+    // why: the cache belongs to the state this request leaves behind, so it
+    // drops before the engine answers and the notification that arrives
+    // with the answer survives it
+    this.preparedCell = null;
     const started = Date.now();
-    this.elements.generating.classList.remove("hidden");
-    await nextAnimationFrame();
-    const result = this.board.isRevealed(cell.x, cell.y)
-      ? this.board.clickNumber(cell.x, cell.y)
-      : this.board.reveal(cell.x, cell.y);
+    // why: generating can take up to a second on the hardest tier, so the
+    // indicator paints only when the click has no searched reveal waiting
+    if (prepared === null) this.elements.generating.classList.remove("hidden");
+    const outcome = await this.client.request(request);
+    this.busy = false;
     this.generationMs += Date.now() - started;
     this.elements.generating.classList.add("hidden");
-    this.renderer.hintCell = null;
-    this.applyResult(result, cell);
+    this.applyOutcome(outcome, this.originOf(request, outcome));
+    return outcome;
   }
 
   private clickCell(cell: Cell): void {
-    if (this.board.status !== "playing") return;
-    if (this.board.hasPrepared(cell.x, cell.y)) {
-      this.revealPrepared(cell);
+    if (this.busy) return;
+    if (this.view.status !== "playing") return;
+    const request: EngineAction = this.view.isRevealed(cell.x, cell.y)
+      ? { kind: "chord", x: cell.x, y: cell.y }
+      : { kind: "reveal", x: cell.x, y: cell.y };
+    void this.submit(request);
+  }
+
+  private applyOutcome(
+    outcome: EngineOutcome | null,
+    origin: Cell | null,
+  ): void {
+    if (outcome === null) return;
+    if (outcome.kind === "hint") {
+      this.applyHint(outcome.hint);
       return;
     }
-    void this.runReveal(cell);
-  }
-
-  // why: the reveal of this cell is already searched, so the click pays no
-  // generation time and no indicator paints
-  private revealPrepared(cell: Cell): void {
-    const result = this.board.reveal(cell.x, cell.y);
-    this.renderer.hintCell = null;
-    this.applyResult(result, cell);
-  }
-
-  private applyResult(result: ClickResult, origin: Cell): void {
+    const snapshot = outcome.snapshot;
+    this.snapshot = snapshot;
     this.startTimerIfNeeded();
     this.recordMilestones();
     this.updateStats();
-    if (this.board.lastFlagged.length > 0) {
-      this.renderer.animateFlagRaise(this.board.lastFlagged);
+    this.renderer.hintCell = null;
+    if (outcome.flag !== undefined) {
+      this.renderer.animateFlagToggle(
+        { x: outcome.flag.x, y: outcome.flag.y },
+        outcome.flag.placed,
+      );
+      playFlagSound(outcome.flag.placed);
+    }
+    if (snapshot.lastFlagged.length > 0) {
+      this.renderer.animateFlagRaise(snapshot.lastFlagged);
       playFlagSound(true);
     }
-    if (result === "ok" && this.board.lastRevealed.length > 0) {
-      this.renderer.animateReveal(this.board.lastRevealed, origin);
-      playRevealSound(this.board.lastRevealed.length);
+    if (
+      origin !== null &&
+      snapshot.lastRevealed.length > 0 &&
+      snapshot.status !== "lost"
+    ) {
+      this.renderer.animateReveal(snapshot.lastRevealed, origin);
+      playRevealSound(snapshot.lastRevealed.length);
     }
     this.renderer.draw();
-    if (result === "lost") {
-      const explodedAt = this.board.explodedAt;
-      if (explodedAt !== null) this.renderer.animateLoss(explodedAt);
+    if (snapshot.status === "lost") {
+      if (snapshot.explodedAt !== null) {
+        this.renderer.animateLoss(snapshot.explodedAt);
+      }
       playLossSound();
       this.scheduleLossOverlay();
     }
-    this.schedulePrepare();
   }
 
-  // why: the next reveal is searched while the browser is idle, so the
-  // click that follows it lands without the generating indicator; a click
-  // that misses the prepared cell pays the interactive search as before.
-  // Each slice is bounded so the search never spends a whole frame on the
-  // main thread, which would stall the reveal ripple.
-  private schedulePrepare(): void {
-    if (this.prepareHandle !== null) return;
-    const target = this.board.nextRevealTarget();
-    this.board.prepareNext(target);
-    if (!this.board.hasPendingPrepare()) return;
-    const prepare = (deadline?: IdleDeadline): void => {
-      this.prepareHandle = null;
-      const remaining =
-        deadline === undefined ? PREPARE_SLICE_MS : deadline.timeRemaining();
-      this.board.advancePrepare(
-        performance.now() +
-          Math.max(
-            1,
-            Math.min(remaining - PREPARE_RESERVE_MS, PREPARE_SLICE_MS),
-          ),
-      );
-      if (this.board.hasPendingPrepare()) this.schedulePrepare();
-    };
-    const idle = typeof window.requestIdleCallback;
-    this.prepareHandle =
-      idle === "function"
-        ? window.requestIdleCallback(prepare)
-        : window.setTimeout(prepare, 0);
+  // why: the reveal ripple staggers by distance from the clicked cell, and
+  // a free cell ripples from the cell the engine opened instead
+  private originOf(
+    request: EngineAction,
+    outcome: EngineOutcome | null,
+  ): Cell | null {
+    if (request.kind === "free") {
+      if (outcome !== null && outcome.kind === "state") {
+        return outcome.freeCell ?? null;
+      }
+      return null;
+    }
+    return { x: request.x, y: request.y };
+  }
+
+  // why: a worker that fails to load or dies mid-run falls back to the
+  // in-process engine, so the run stays playable without the worker
+  private onEngineFailure(): void {
+    if (this.fellBack) return;
+    this.fellBack = true;
+    const local = new LocalEngineClient();
+    local.onPrepared((cell) => {
+      this.preparedCell = cell;
+    });
+    this.client = local;
+    void this.restart();
   }
 
   // why: the un-blurred board (ring, mines, wrong flags) stays visible
@@ -641,7 +663,7 @@ class Game {
   }
 
   private startTimerIfNeeded(): void {
-    if (this.timerStart === null && this.board.revealedCount > 0) {
+    if (this.timerStart === null && this.view.revealedCount > 0) {
       this.timerStart = Date.now();
     }
   }
@@ -657,7 +679,7 @@ class Game {
   // ponytail: biggest is checkpointed every 100 tiles instead of every
   // reveal, long runs persist within ~99 tiles of their peak
   private recordMilestones(): void {
-    const cleared = this.board.revealedCount;
+    const cleared = this.view.revealedCount;
     if (cleared >= FASTEST_TARGET_TILES && !this.fastestRecorded) {
       this.fastestRecorded = true;
       this.leaderboard.recordFastest(this.difficulty.id, this.currentRecord());
@@ -666,26 +688,34 @@ class Game {
       this.lastMilestone = Math.floor(cleared / 100) * 100;
       this.leaderboard.recordBiggest(this.difficulty.id, this.currentRecord());
     }
-    if (this.board.status === "lost") {
+    if (this.view.status === "lost") {
       this.leaderboard.recordBiggest(this.difficulty.id, this.currentRecord());
     }
   }
 
   private currentRecord(): RunRecord {
     return {
-      tiles: this.board.revealedCount,
+      tiles: this.view.revealedCount,
       seconds: this.elapsedSeconds(),
       date: new Date().toISOString(),
-      seed: this.board.seed,
+      seed: this.seed,
     };
   }
 
-  private onHint(): void {
-    if (this.board.status !== "playing") return;
-    const hint = this.board.findHint();
+  private async onHint(): Promise<void> {
+    if (this.busy) return;
+    if (this.view.status !== "playing") return;
+    this.busy = true;
+    const outcome = await this.client.request({ kind: "hint" });
+    this.busy = false;
+    if (outcome?.kind !== "hint") return;
+    this.applyHint(outcome.hint);
+  }
+
+  private applyHint(hint: Cell | null): void {
     if (hint === null) {
       this.showToast(
-        this.board.revealedCount === 0
+        this.view.revealedCount === 0
           ? "Open anywhere to start - the first click is always safe"
           : "No certain move - open a Free cell (F) or guess in the marked zone",
       );
@@ -695,46 +725,32 @@ class Game {
     this.renderer.draw();
   }
 
-  private onFreeCell(): void {
-    if (this.board.status !== "playing") return;
-    const target = this.board.zoneFreeTarget();
-    if (target !== null && this.board.hasPrepared(target.x, target.y)) {
-      const cell = this.board.freeCell();
-      if (cell !== null) {
-        this.renderer.hintCell = null;
-        this.applyResult("ok", cell);
-        this.renderer.animateFreeCell(cell);
-        playFreeCellSound();
-        return;
-      }
-    }
+  private async onFreeCell(): Promise<void> {
+    if (this.busy) return;
+    if (this.view.status !== "playing") return;
     // why: the free cell also waits for the reveal search, so it shows the
     // indicator like any other reveal
-    void this.runFreeCell();
-  }
-
-  private async runFreeCell(): Promise<void> {
-    const started = Date.now();
-    this.elements.generating.classList.remove("hidden");
-    await nextAnimationFrame();
-    const cell = this.board.freeCell();
-    this.generationMs += Date.now() - started;
-    this.elements.generating.classList.add("hidden");
-    if (cell === null) {
-      this.showToast(this.freeCellRefusal());
+    const outcome = await this.submit({ kind: "free" });
+    if (outcome?.kind !== "state") return;
+    if (outcome.freeCell === undefined || outcome.freeCell === null) {
+      // why: a free cell that exploded already closed the game over, and
+      // the loss overlay says what happened — the refusal toast would only
+      // repeat it
+      if (this.snapshot?.status === "playing") {
+        this.showToast(this.freeCellRefusal());
+      }
       return;
     }
     this.renderer.hintCell = null;
-    this.applyResult("ok", cell);
-    this.renderer.animateFreeCell(cell);
+    this.renderer.animateFreeCell(outcome.freeCell);
     playFreeCellSound();
   }
 
   private freeCellRefusal(): string {
-    if (this.board.revealedCount === 0) {
+    if (this.view.revealedCount === 0) {
       return "Open anywhere to start - the first click is always safe";
     }
-    if (this.board.deductionState().certainMove) {
+    if (this.snapshot?.certainMove === true) {
       return "A certain move exists - the free cell is only for guess zones";
     }
     return "No safe cell in the marked zone - start a new game (N)";
@@ -742,16 +758,26 @@ class Game {
 
   private onDifficultyChange(): void {
     this.difficulty = difficultyById(this.elements.difficulty.value);
-    this.restart();
+    void this.restart();
   }
 
-  private restart(): void {
+  private async restart(): Promise<void> {
     if (this.lossOverlayTimeout !== null) {
       window.clearTimeout(this.lossOverlayTimeout);
       this.lossOverlayTimeout = null;
     }
-    this.board = this.newBoard();
-    this.renderer.setBoard(this.board);
+    this.busy = false;
+    this.preparedCell = null;
+    this.snapshot = null;
+    this.seed = this.newSeed();
+    const outcome = await this.client.newGame(
+      this.seed,
+      this.difficulty.density,
+    );
+    if (outcome !== null && outcome.kind === "state") {
+      this.snapshot = outcome.snapshot;
+    }
+    this.renderer.setBoard(this.view);
     this.renderer.centerOn({ x: 0, y: 0 });
     this.timerStart = null;
     this.generationMs = 0;
@@ -764,7 +790,7 @@ class Game {
 
   private showLossOverlay(): void {
     this.elements.overlayTitle.textContent = randomTaunt();
-    this.elements.overlayText.textContent = `Cleared ${String(this.board.revealedCount)} tiles.`;
+    this.elements.overlayText.textContent = `Cleared ${String(this.view.revealedCount)} tiles.`;
     this.elements.overlay.classList.remove("hidden");
   }
 
@@ -832,8 +858,8 @@ class Game {
   }
 
   private updateStats(): void {
-    this.elements.flags.textContent = `Flags ${String(this.board.flaggedCount)}`;
-    this.elements.cleared.textContent = `Cleared ${String(this.board.revealedCount)}`;
+    this.elements.flags.textContent = `Flags ${String(this.view.flaggedCount)}`;
+    this.elements.cleared.textContent = `Cleared ${String(this.view.revealedCount)}`;
     this.updateGuessZone();
     this.updateTime();
   }
@@ -841,16 +867,18 @@ class Game {
   // why: the board reports hidden cells that stay ambiguous after
   // deduction; the zone is empty whenever a certain move exists
   private updateGuessZone(): void {
-    const state = this.board.deductionState();
+    const snapshot = this.snapshot;
+    const guessCells =
+      snapshot === null || snapshot.certainMove ? [] : snapshot.guessCells;
     this.renderer.guessZone = new Set(
-      state.guessCells.map((cell) => keyOf(cell.x, cell.y)),
+      guessCells.map((cell) => keyOf(cell.x, cell.y)),
     );
-    if (state.certainMove) {
+    if (guessCells.length === 0) {
       this.elements.state.textContent = "";
       this.elements.state.classList.add("hidden");
       return;
     }
-    this.elements.state.textContent = `Guess zone ${String(state.guessCells.length)} cells`;
+    this.elements.state.textContent = `Guess zone ${String(guessCells.length)} cells`;
     this.elements.state.classList.remove("hidden");
   }
 
@@ -875,14 +903,6 @@ function formatSeconds(total: number): string {
 
 function shortDate(iso: string): string {
   return iso.slice(0, 10);
-}
-
-function nextAnimationFrame(): Promise<void> {
-  return new Promise((resolve) => {
-    window.requestAnimationFrame(() => {
-      resolve();
-    });
-  });
 }
 
 function requireElement<T extends HTMLElement>(

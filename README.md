@@ -144,11 +144,12 @@ answers requests with snapshots: a read-only copy of what the renderer and
 the HUD need (revealed counts, flags, the marked zone, plus the terrain
 table that answers `isMine` for the loss screen). The main thread keeps
 input, animation and paint, so a generation search of up to a second on
-Insane costs the reveal ripple no frame at all, and the precompute needs
-no idle slicing because off-thread there is no frame to protect. Every
-soundness invariant stays inside the engine; only the view crosses. Where
-module workers are unavailable the same engine runs in-process and the
-game simply skips precompute.
+Insane costs the reveal ripple no frame at all. The answer to a reveal is
+sent before the precompute of the next one starts, and the precompute runs
+in bounded slices that yield to the next request, so a click never waits
+behind it. Every soundness invariant stays inside the engine; only the
+view crosses. Where module workers are unavailable the same engine runs
+in-process with the same sliced precompute.
 
 The solver propagates per-cell mine bounds (lower and upper) across the
 whole frontier until they stop tightening, then enumerates small

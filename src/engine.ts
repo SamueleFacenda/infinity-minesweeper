@@ -87,6 +87,12 @@ export function handleEngineMessage(
       const wasFlagged = board.isFlagged(request.x, request.y);
       board.toggleFlag(request.x, request.y);
       const placed = board.isFlagged(request.x, request.y);
+      // why: the board keeps the previous reveal's animation batches until
+      // the next reveal resets them, and a flag toggle reveals nothing, so
+      // an answer that carried them would replay a ripple that already
+      // played
+      board.lastRevealed = [];
+      board.lastFlagged = [];
       const reply =
         placed === wasFlagged
           ? stateReply(board, gameId)

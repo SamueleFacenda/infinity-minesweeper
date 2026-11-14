@@ -133,6 +133,22 @@ describe("engine handler", () => {
     expect(view.revealedCount).toBeGreaterThan(0);
   }, 60_000);
 
+  it("reports no reveal batch for a flag toggle", () => {
+    const session: EngineSession = { board: null };
+    const view = new SnapshotView();
+    send(session, { kind: "new", seed: 3, density: EASY_DENSITY });
+    wire(view, session);
+    const opened = stateSnapshot(send(session, { kind: "reveal", x: 0, y: 0 }));
+    expect(opened.lastRevealed.length).toBeGreaterThan(0);
+    view.update(opened);
+    const hidden = firstHiddenCell(view);
+    const flagged = stateSnapshot(
+      send(session, { kind: "flag", x: hidden.x, y: hidden.y }),
+    );
+    expect(flagged.lastRevealed).toEqual([]);
+    expect(flagged.lastFlagged).toEqual([]);
+  });
+
   it("reports a flag placement only when the flag changed", () => {
     const session: EngineSession = { board: null };
     const view = new SnapshotView();

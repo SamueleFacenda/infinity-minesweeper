@@ -8,6 +8,7 @@ import {
 } from "./coords.js";
 import { enclosedRegions } from "./regions.js";
 import { blockQuota, cellHash } from "./rng.js";
+import type { ChunkTerrain, TerrainTable } from "./snapshot.js";
 import { findSafeCell, solve } from "./solver.js";
 
 export type GameStatus = "playing" | "lost";
@@ -258,6 +259,29 @@ export class Board {
 
   get flaggedCount(): number {
     return this.flagSet.size;
+  }
+
+  get flagView(): ReadonlySet<string> {
+    return this.flagSet;
+  }
+
+  // why: the presentation answers isMine for hidden cells anywhere on the
+  // infinite board (the loss screen), and a pure hash needs no mine layout
+  // stored — the frozen quotas and nonces of every touched chunk are enough
+  terrainTable(): TerrainTable {
+    const chunks = new Map<string, ChunkTerrain>();
+    for (const [chunkKey, nonce] of this.nonces) {
+      chunks.set(chunkKey, {
+        nonce,
+        quota: this.chunkQuotas.get(chunkKey) ?? null,
+      });
+    }
+    return {
+      seed: this.seed,
+      density: this.density,
+      pinnedSafe: new Set(this.pinnedSafe),
+      chunks,
+    };
   }
 
   isRevealed(x: number, y: number): boolean {

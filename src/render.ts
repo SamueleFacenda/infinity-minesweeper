@@ -1,4 +1,4 @@
-import type { Board } from "./game/board.js";
+import type { BoardView } from "./game/snapshot.js";
 import type { Cell } from "./game/coords.js";
 import { keyOf } from "./game/coords.js";
 import type { CanvasPalette } from "./theme.js";
@@ -300,10 +300,10 @@ export class Renderer {
   constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly ctx: CanvasRenderingContext2D,
-    private board: Board,
+    private board: BoardView,
   ) {}
 
-  setBoard(board: Board): void {
+  setBoard(board: BoardView): void {
     this.board = board;
     this.hintCell = null;
     this.guessZone = new Set();

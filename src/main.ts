@@ -59,7 +59,7 @@ interface Elements {
 
 class Game {
   private client: EngineClient;
-  private readonly view: SnapshotView;
+  private view: SnapshotView;
   private readonly renderer: Renderer;
   // why: the last snapshot the engine answered with, cached for the HUD
   private snapshot: EngineSnapshot | null = null;
@@ -646,6 +646,7 @@ class Game {
       this.preparedCell = cell;
     });
     this.client = local;
+    this.view = local.view;
     void this.restart();
   }
 

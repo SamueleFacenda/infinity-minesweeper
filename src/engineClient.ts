@@ -141,6 +141,7 @@ export class WorkerEngineClient implements EngineClient {
     this.pending.clear();
     const listener = this.failureListener;
     this.failureListener = null;
+    this.worker.terminate();
     listener?.();
   }
 }

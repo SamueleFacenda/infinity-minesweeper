@@ -16,6 +16,8 @@ export interface BoardView {
   isMine(x: number, y: number): boolean;
   readonly status: GameStatus;
   readonly explodedAt: Cell | null;
+  readonly revealedCount: number;
+  readonly flaggedCount: number;
 }
 
 export interface ChunkTerrain {

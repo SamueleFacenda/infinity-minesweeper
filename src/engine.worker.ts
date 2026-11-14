@@ -23,7 +23,11 @@ interface EngineFailure {
 scope.onmessage = (event: MessageEvent<EngineMessage>): void => {
   try {
     const replies = handleEngineMessage(session, event.data);
-    for (const reply of replies) scope.postMessage(reply);
+    // why: the request id rides on every message so the client can match
+    // replies and drop the ones a restarted game superseded
+    for (const reply of replies) {
+      scope.postMessage({ requestId: event.data.requestId, ...reply });
+    }
   } catch (error) {
     scope.postMessage({
       requestId: event.data.requestId,

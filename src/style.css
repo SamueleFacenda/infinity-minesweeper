@@ -209,16 +209,29 @@ main {
   background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: 10px;
-  padding: 0.75rem 1.25rem;
-  font-size: 0.9rem;
-  font-weight: 600;
-  color: var(--accent);
+  padding: 0.7rem;
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.4);
   pointer-events: none;
 }
 
 .generating:not(.hidden) {
   animation: toast-in 150ms ease-out;
+}
+
+.generating-spinner {
+  display: block;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 50%;
+  border: 3px solid color-mix(in oklab, var(--accent) 25%, transparent);
+  border-top-color: var(--accent);
+  animation: generating-spin 700ms linear infinite;
+}
+
+@keyframes generating-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .overlay,

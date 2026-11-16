@@ -49,8 +49,13 @@
       <canvas id="board-canvas"></canvas>
     </main>
     <div id="toast" class="toast hidden"></div>
-    <div id="generating" class="generating hidden" role="status">
-      Generating board…
+    <div
+      id="generating"
+      class="generating hidden"
+      role="status"
+      aria-label="Generating board…"
+    >
+      <span class="generating-spinner" aria-hidden="true"></span>
     </div>
     <div id="overlay" class="overlay hidden">
       <div class="overlay-card">

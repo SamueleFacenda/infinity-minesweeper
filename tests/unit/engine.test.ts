@@ -329,6 +329,43 @@ describe("engine handler", () => {
       pool.dispose();
     }
   }, 60_000);
+
+  // why: the precompute searches every certain move, not only the one the
+  // hint names, so a click on any of them adopts its own searched state
+  it("prepares every certain move and adopts the one that is clicked", async () => {
+    const pool = new SearchPool(4, () => new PooledSearchWorker());
+    const session: EngineSession = { board: null, pool };
+    try {
+      await send(session, { kind: "new", seed: 3, density: 0.35 });
+      await send(session, { kind: "reveal", x: 0, y: 0 });
+      const board = session.board;
+      if (board === null) throw new Error("session has no board");
+      const targets = board.preparedTargets();
+      expect(targets.length).toBeGreaterThan(0);
+      startPrepare(session, GAME_ID);
+      for (let wait = 0; wait < 400; wait++) {
+        const ready = targets.every((target) =>
+          board.hasPrepared(target.x, target.y),
+        );
+        if (ready) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const prepared = targets.filter((target) =>
+        board.hasPrepared(target.x, target.y),
+      );
+      expect(prepared.length).toBeGreaterThan(0);
+      const pick = prepared[prepared.length - 1] ?? prepared[0];
+      if (pick === undefined) return;
+      const before = board.revealedCount;
+      const adopted = stateSnapshot(
+        await send(session, { kind: "reveal", x: pick.x, y: pick.y }),
+      );
+      expect(adopted.revealed.size).toBeGreaterThan(before);
+      expect(adopted.certainMove).toBe(true);
+    } finally {
+      pool.dispose();
+    }
+  }, 60_000);
 });
 
 function firstHiddenCell(view: SnapshotView) {

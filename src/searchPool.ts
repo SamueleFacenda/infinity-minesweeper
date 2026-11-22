@@ -33,10 +33,17 @@ export interface PooledSearchRequest {
   readonly cells: readonly (readonly [number, number])[];
   readonly deep: boolean;
   readonly budgetMs: number;
+  // why: an idle precompute carries one search per cell, so a slot
+  // searches each of its assigned cells on its own and the answers merge
+  readonly perCell?: boolean;
 }
 
 export type PooledSearchResult =
   | { readonly outcome: "accepted"; readonly state: BoardSearchState }
+  | {
+      readonly outcome: "prepared";
+      readonly states: Readonly<Record<string, BoardSearchState>>;
+    }
   | {
       readonly outcome: "committed";
       readonly state?: BoardSearchState;
@@ -74,6 +81,10 @@ export class SearchPool {
       // layout, so the first exhausted slot's state is kept as the answer
       // for the case where no slot accepts, instead of searching again
       let exhausted: BoardSearchState | undefined;
+      // why: a per-cell precompute waits for every slot and merges, so the
+      // searched state of each certain move comes back with one request
+      const merged: Record<string, BoardSearchState> = {};
+      const perCell = request.perCell === true;
       const required = active.length;
       const finish = (result: PooledSearchResult): void => {
         if (settled) return;
@@ -87,9 +98,11 @@ export class SearchPool {
         gaveUp += 1;
         if (gaveUp >= required) {
           finish(
-            exhausted === undefined
-              ? { outcome: "committed" }
-              : { outcome: "committed", state: exhausted },
+            perCell
+              ? { outcome: "prepared", states: merged }
+              : exhausted === undefined
+                ? { outcome: "committed" }
+                : { outcome: "committed", state: exhausted },
           );
         }
       };
@@ -97,6 +110,11 @@ export class SearchPool {
         finish({ outcome: "committed" });
       }, request.budgetMs + WORKER_GRACE_MS);
       active.forEach((slot, index) => {
+        // why: a per-cell precompute hands each slot its own share of the
+        // cells, and every search of a cell runs the whole attempt space
+        const assigned = perCell
+          ? request.cells.filter((_, cell) => cell % active.length === index)
+          : request.cells;
         slot.worker.onmessage = (event): void => {
           if (!slot.busy) return;
           const reply = event.data;
@@ -104,6 +122,13 @@ export class SearchPool {
           // is free again even when the reply belongs to an older search
           slot.busy = false;
           if (reply.id !== id) return;
+          if (reply.states !== undefined) {
+            Object.assign(merged, reply.states);
+          }
+          if (perCell) {
+            giveUp();
+            return;
+          }
           if (reply.outcome === "accepted" && reply.state !== undefined) {
             finish({ outcome: "accepted", state: reply.state });
             return;
@@ -129,11 +154,12 @@ export class SearchPool {
         const message: SearchRequest = {
           id,
           state: request.state,
-          cells: request.cells,
+          cells: assigned,
           deep: request.deep,
           budgetMs: request.budgetMs,
-          attemptOffset: index,
+          attemptOffset: perCell ? 0 : index,
           stride: active.length,
+          perCell: request.perCell,
         };
         slot.worker.postMessage(message);
       });

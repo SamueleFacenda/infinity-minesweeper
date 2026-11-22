@@ -150,7 +150,9 @@ describe("search pool", () => {
     const target = board.findHint();
     expect(target).not.toBeNull();
     if (target === null) return;
-    const result = await pool.search(board.pooledSearchRequest(target, false));
+    const result = await pool.search(
+      board.pooledSearchRequest([[target.x, target.y]], false),
+    );
     expect(result.outcome).toBe("accepted");
     if (result.outcome !== "accepted") return;
     const before = board.revealedCount;

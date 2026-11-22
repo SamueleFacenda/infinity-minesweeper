@@ -21,10 +21,9 @@ export interface DeductionState {
 }
 
 // A reveal the board already searched for while it was idle: the accepted
-// candidate's whole state, ready to be adopted on the matching click.
+// candidate's whole state, ready to be adopted on the matching click. The
+// cache holds one entry per certain move, so any of them adopts instantly.
 interface PreparedReveal {
-  readonly x: number;
-  readonly y: number;
   // why: every mutation of the persisted state bumps the version, so a
   // prepared state from before a change can never be adopted
   readonly version: number;
@@ -48,7 +47,9 @@ export interface BoardSearchState {
 }
 
 // One message of the pooled-search protocol between the engine and a
-// search worker.
+// search worker. A reveal carries the cells of one search and the slot's
+// stride over the attempt space; an idle precompute carries one cell per
+// search, so a slot searches each of its assigned cells on its own.
 export interface SearchRequest {
   readonly id: number;
   readonly state: BoardSearchState;
@@ -57,6 +58,7 @@ export interface SearchRequest {
   readonly budgetMs: number;
   readonly attemptOffset: number;
   readonly stride: number;
+  readonly perCell?: boolean;
 }
 
 export interface SearchReply {
@@ -64,6 +66,9 @@ export interface SearchReply {
   readonly outcome: RevealOutcome;
   readonly state?: BoardSearchState;
   readonly explodedAt?: Cell | null;
+  // why: a per-cell precompute answers with one state per cell it
+  // accepted, keyed by cell, so every searched cell adopts on its click
+  readonly states?: Readonly<Record<string, BoardSearchState>>;
 }
 
 interface BestCandidate {
@@ -89,6 +94,10 @@ interface AttemptSearch {
   // why: wall-clock bound of the whole search, so a job driven in slices
   // can never linger past the budget it was given
   readonly deadline: number;
+  // why: the budget the deadline was computed from, so a search that no
+  // candidate can satisfy can be given up on before its whole budget is
+  // spent on attempts that all stall short
+  readonly budgetMs: number;
   // why: the point after which judging a candidate stops instead of
   // spending the slice on it; null for the interactive search, which runs
   // to completion with no frame to protect
@@ -98,7 +107,24 @@ interface AttemptSearch {
   fastPathTried: boolean;
   pocketChecks: number;
   judge: JudgeState | null;
+  // why: whether any candidate reached the tier floor; once one has, a
+  // search that keeps looking is spending its budget on a deeper closure,
+  // while one where none has is burning attempts on a stalled frontier
+  sawFloor: boolean;
 }
+
+// Certain moves an idle precompute searches ahead of the click: enough
+// that the click that arrives is almost always prepared, few enough that
+// the idle work stays bounded on a wide deducible region.
+const PREPARED_TARGET_LIMIT = 8;
+
+// A share of the budget a search without any floor-reaching candidate may
+// spend before it gives up: re-rolling cannot fix ambiguity that
+// already-committed terrain owns, and every further attempt only costs.
+const STALLED_SEARCH_SHARE = 0.4;
+// Attempts a search tries before the stalled share applies, so a genuine
+// floor-reaching candidate is never cut off by a slow first attempt.
+const STALLED_SEARCH_ATTEMPTS = 4;
 
 // A precompute in flight: the clone the search mutates, the search state,
 // and the cell the prepared reveal belongs to.
@@ -243,7 +269,10 @@ const MAX_POCKET_CHECKS = 16;
 
 // why: an idle precompute has no player waiting on it, so it can afford a
 // longer search than the interactive one and find a deeper chain
-const PREPARE_BUDGET_FACTOR = 2;
+// why: the idle precompute gets the same budget as an interactive search,
+// because a search that no candidate can satisfy now gives up early and
+// the extra budget bought depth no click waits for
+const PREPARE_BUDGET_FACTOR = 1;
 
 function copyInto(
   target: Map<string, number>,
@@ -307,7 +336,7 @@ export class Board {
   // why: bumped by every change of the persisted state, so a prepared
   // reveal older than the current version is discarded instead of adopted
   private stateVersion = 0;
-  private prepared: PreparedReveal | null = null;
+  private prepared = new Map<string, PreparedReveal>();
   private pendingPrepare: PendingPrepare | null = null;
 
   constructor(seed: number, density: number) {
@@ -380,19 +409,35 @@ export class Board {
   }
 
   reveal(x: number, y: number): ClickResult {
+    return this.revealCells([[x, y]]);
+  }
+
+  // Reveals a set of cells through the generation search, the way a chord
+  // or a free cell does. The engine's pooled path prepares the request,
+  // adopts the winner and only falls back to this when no pool runs.
+  revealCells(cells: readonly (readonly [number, number])[]): ClickResult {
     if (this.status !== "playing") return "ok";
-    const prepared = this.prepared;
-    this.invalidatePrepared();
     this.lastRevealed = [];
     this.lastFlagged = [];
-    const key = keyOf(x, y);
-    if (this.revealedMap.has(key) || this.flagSet.has(key)) return "ok";
-    if (this.adoptsPrepared(prepared, x, y)) {
+    const first = cells[0];
+    if (first === undefined) return "ok";
+    const [x, y] = first;
+    // why: the entry is read before the cache is dropped, because the
+    // reveal it belongs to is the one that makes it stale
+    const prepared = this.adoptsPrepared(x, y);
+    this.invalidatePrepared();
+    if (prepared !== null) {
       this.adoptFrom(prepared.board);
       return "ok";
     }
-    if (this.revealedMap.size === 0) this.pinArea(x, y);
-    return this.revealGroup([[x, y]], this.revealedMap.size === 0);
+    const deep = this.revealedMap.size === 0;
+    if (deep) this.pinArea(x, y);
+    const guarded = cells.filter(([cx, cy]) => {
+      const key = keyOf(cx, cy);
+      return !this.revealedMap.has(key) && !this.flagSet.has(key);
+    });
+    if (guarded.length === 0) return "ok";
+    return this.revealGroup(guarded, deep);
   }
 
   // Clicking a revealed number: auto-disclose when the flags satisfy the
@@ -456,9 +501,9 @@ export class Board {
     this.lastFlagged = [];
     const target = this.zoneFreeTarget();
     if (target === null) return null;
-    const prepared = this.prepared;
+    const prepared = this.adoptsPrepared(target.x, target.y);
     this.invalidatePrepared();
-    if (this.adoptsPrepared(prepared, target.x, target.y)) {
+    if (prepared !== null) {
       this.adoptFrom(prepared.board);
       return target;
     }
@@ -468,13 +513,7 @@ export class Board {
   }
 
   hasPrepared(x: number, y: number): boolean {
-    const prepared = this.prepared;
-    return (
-      prepared !== null &&
-      prepared.x === x &&
-      prepared.y === y &&
-      prepared.version === this.stateVersion
-    );
+    return this.adoptsPrepared(x, y) !== null;
   }
 
   // why: the search runs in idle slices, so the caller keeps rescheduling
@@ -540,28 +579,17 @@ export class Board {
     this.pendingPrepare = null;
     // why: a candidate the search had to fall back on is not worth
     // adopting, the click then pays the interactive search as before
-    this.prepared =
-      outcome === "accepted"
-        ? {
-            x: job.cell.x,
-            y: job.cell.y,
-            version: this.stateVersion,
-            board: job.board,
-          }
-        : null;
+    if (outcome === "accepted") {
+      this.prepared.set(keyOf(job.cell.x, job.cell.y), {
+        version: this.stateVersion,
+        board: job.board,
+      });
+    }
   }
 
-  private adoptsPrepared(
-    prepared: PreparedReveal | null,
-    x: number,
-    y: number,
-  ): prepared is PreparedReveal {
-    return (
-      prepared !== null &&
-      prepared.x === x &&
-      prepared.y === y &&
-      prepared.version === this.stateVersion
-    );
+  private adoptsPrepared(x: number, y: number): PreparedReveal | null {
+    const prepared = this.prepared.get(keyOf(x, y));
+    return prepared?.version === this.stateVersion ? prepared : null;
   }
 
   private clone(): Board {
@@ -596,7 +624,7 @@ export class Board {
   // precompute and the in-flight one, so a prepared reveal is either for
   // the current state or it does not exist
   private invalidatePrepared(): void {
-    this.prepared = null;
+    this.prepared = new Map();
     this.pendingPrepare = null;
   }
 
@@ -678,11 +706,11 @@ export class Board {
     return closureBounds(generationProfile(this.density), deep).floor;
   }
 
-  // The search a pool slot receives for one cell: the transferable state
-  // and the budget the tier gives the search, doubled for an idle
-  // precompute that has no player waiting on it.
+  // The search a pool slot receives: the transferable state and the budget
+  // the tier gives the search, doubled for an idle precompute that has no
+  // player waiting on it.
   pooledSearchRequest(
-    cell: Cell,
+    cells: readonly (readonly [number, number])[],
     prepare: boolean,
   ): {
     readonly state: BoardSearchState;
@@ -691,9 +719,14 @@ export class Board {
     readonly budgetMs: number;
   } {
     const deep = this.revealedMap.size === 0;
+    const first = cells[0];
     return {
-      state: deep ? this.searchStateWithPin(cell) : this.searchState(),
-      cells: [[cell.x, cell.y]],
+      state: deep
+        ? this.searchStateWithPin(
+            first === undefined ? { x: 0, y: 0 } : { x: first[0], y: first[1] },
+          )
+        : this.searchState(),
+      cells,
       deep,
       budgetMs:
         generationProfile(this.density).budgetMs *
@@ -704,19 +737,26 @@ export class Board {
   // Stores an accepted precompute so the matching click adopts it instead
   // of searching again. A board changed since the search started rejects
   // it, exactly like the version check of an adopted reveal.
-  storePrepared(cell: Cell, version: number, state: BoardSearchState): boolean {
-    if (this.stateVersion !== version) return false;
-    if (this.status !== "playing") return false;
-    if (this.revealedMap.has(keyOf(cell.x, cell.y))) return false;
-    if (this.flagSet.has(keyOf(cell.x, cell.y))) return false;
+  // Stores the searched states of an idle precompute, keyed by cell, so a
+  // click on any prepared cell adopts its own state.
+  storePrepared(
+    entries: readonly {
+      readonly cell: Cell;
+      readonly state: BoardSearchState;
+    }[],
+    version: number,
+  ): void {
+    if (this.stateVersion !== version) return;
+    if (this.status !== "playing") return;
     this.invalidatePrepared();
-    this.prepared = {
-      x: cell.x,
-      y: cell.y,
-      version,
-      board: Board.fromSearchState(state),
-    };
-    return true;
+    for (const entry of entries) {
+      const key = keyOf(entry.cell.x, entry.cell.y);
+      if (this.revealedMap.has(key) || this.flagSet.has(key)) continue;
+      this.prepared.set(key, {
+        version,
+        board: Board.fromSearchState(entry.state),
+      });
+    }
   }
 
   // A copy of the board that can run a candidate search without touching
@@ -730,6 +770,23 @@ export class Board {
   // opening the live board would never offer
   pinOpening(cell: Cell): void {
     this.pinArea(cell.x, cell.y);
+  }
+
+  // The cells an idle precompute searches ahead of the click: every certain
+  // move up to the limit, or the zone's free cell when none is certain.
+  // A wide deducible region costs bounded idle work, and the click that
+  // arrives is almost always the first of them.
+  preparedTargets(limit = PREPARED_TARGET_LIMIT): Cell[] {
+    const zone = this.nextRevealTarget();
+    if (zone === null) return [];
+    if (this.findHint() === null) return [zone];
+    const cells = new Map<string, Cell>();
+    cells.set(keyOf(zone.x, zone.y), zone);
+    for (const key of solve(this.revealedMap).safe) {
+      if (cells.size >= limit) break;
+      cells.set(key, parseKey(key));
+    }
+    return [...cells.values()];
   }
 
   // A slice of the attempt space for the search pool: attemptOffset is
@@ -832,7 +889,7 @@ export class Board {
   // re-rolls of the freshly committed chunks hunting for a state where a
   // certain move exists and every enclosed pocket stays deducible.
   private revealGroup(
-    cells: readonly [number, number][],
+    cells: readonly (readonly [number, number])[],
     deep: boolean,
   ): ClickResult {
     const outcome = this.searchReveal(
@@ -888,9 +945,11 @@ export class Board {
       profile,
       snap: this.snapshot(),
       deadline: Date.now() + budgetMs,
+      budgetMs,
       limit,
       attempt: 0,
       best: null,
+      sawFloor: false,
       fastPathTried: false,
       pocketChecks: 0,
       judge: null,
@@ -935,6 +994,10 @@ export class Board {
     judge: JudgeState,
   ): RevealOutcome | null {
     const { floor, cap } = closureBounds(search.profile, search.deep);
+    // why: a proven-safe cell stays safe as the playout reveals more, so
+    // one solve's safe set is played through before the next full solve;
+    // resolving per step made the closure cost depth times the board
+    let pending: string[] = [];
     while (judge.reached < cap) {
       if (this.pastLimit(search.limit)) return null;
       // why: the floor is the acceptance criterion, so the playout stops
@@ -946,8 +1009,13 @@ export class Board {
       // finish its closure inside the budget still counts for what it
       // proved, and one playout can never run past the whole budget
       if (Date.now() > search.deadline) break;
-      const hint = findSafeCell(this.revealedMap);
-      if (hint === null) break;
+      const hint = pending.shift() ?? null;
+      if (hint === null) {
+        pending = [...solve(this.revealedMap).safe];
+        if (pending.length === 0) break;
+        continue;
+      }
+      if (this.revealedMap.has(hint)) continue;
       const { x, y } = parseKey(hint);
       if (this.attemptReveal([[x, y]]).exploded) break;
       judge.reached++;
@@ -968,6 +1036,9 @@ export class Board {
     const { deep, profile } = search;
     const { floor } = closureBounds(profile, deep);
     const reaches = depth >= floor;
+    if (reaches) search.sawFloor = true;
+    // why: the first candidate and every deeper one are worth checking,
+    // so an exhausted search still delivers the deepest closure it saw
     const improves = search.best === null || depth > search.best.score;
     const worthChecking = (reaches && !search.fastPathTried) || improves;
     if (!worthChecking) return this.afterAttempt(search);
@@ -1003,6 +1074,19 @@ export class Board {
   private afterAttempt(search: AttemptSearch): RevealOutcome | null {
     this.rollbackAndReroll(search.snap);
     search.attempt++;
+    // why: once the search has spent its stalled share without a single
+    // candidate reaching the floor, the frontier is one re-rolls cannot
+    // repair and every further attempt only costs; the honest best so far
+    // is what such a state delivers anyway
+    const stalled =
+      Date.now() > search.deadline - search.budgetMs * STALLED_SEARCH_SHARE;
+    if (
+      !search.sawFloor &&
+      search.attempt >= STALLED_SEARCH_ATTEMPTS &&
+      stalled
+    ) {
+      return this.finishSearch(search);
+    }
     if (Date.now() > search.deadline) return this.finishSearch(search);
     if (search.attempt >= search.profile.candidates) {
       return this.finishSearch(search);

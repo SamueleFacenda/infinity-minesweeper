@@ -1,5 +1,9 @@
 import { Board } from "./game/board.js";
-import type { SearchReply, SearchRequest } from "./game/board.js";
+import type {
+  BoardSearchState,
+  SearchReply,
+  SearchRequest,
+} from "./game/board.js";
 
 // One slot of the search pool. It reconstructs the board from the
 // transferred state, searches its own slice of the attempt space, and
@@ -39,6 +43,32 @@ interface WorkerScope {
 const scope = globalThis as unknown as WorkerScope;
 
 function answer(request: SearchRequest): void {
+  // why: an idle precompute searches each of its cells on its own, because
+  // a click on any of them is the click that arrives
+  if (request.perCell === true) {
+    const states: Record<string, BoardSearchState> = {};
+    for (const [cx, cy] of request.cells) {
+      const board = Board.fromSearchState(request.state);
+      const outcome = board.runPooledSearch(
+        [[cx, cy]],
+        request.deep,
+        request.budgetMs,
+        0,
+        1,
+      );
+      if (outcome === "accepted") {
+        states[`${String(cx)},${String(cy)}`] = board.searchState();
+      }
+    }
+    const reply: SearchReply = {
+      id: request.id,
+      outcome: "accepted",
+      states,
+    };
+    if (parentPort === null) scope.postMessage(reply);
+    else parentPort.postMessage(reply);
+    return;
+  }
   const board = Board.fromSearchState(request.state);
   const outcome = board.runPooledSearch(
     request.cells,

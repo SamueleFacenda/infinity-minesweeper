@@ -122,14 +122,14 @@ only custom boards and "evil" no-guess modes like minesweeper.online's
    Generation can take up to about a second and a half on Insane, so a
    "Generating board..." indicator paints first and the run clock stops
    while it runs.
-5. The next reveal is searched ahead of the click. After every reveal the
-   game asks the board for its next target - the certain move, or the free
-   cell of a marked zone - and searches that reveal in the engine thread,
-   with twice the interactive budget. A click that lands on the prepared
-   cell adopts the searched state directly: no indicator, no waiting, and
-   the search happens while the player reads the board rather than while
-   they wait on it. Any click still works; a click somewhere else simply
-   pays the interactive search as before.
+5. Every certain move is searched ahead of the click. After every reveal
+   the game searches each move the solver can prove - the hint first - in
+   the engine thread, so a click on any prepared cell adopts the searched
+   state directly: no indicator, no waiting, and the search happens while
+   the player reads the board rather than while they wait on it. Any click
+   still works; a click somewhere else pays the interactive search. A click
+   that arrives while a search runs is queued, not dropped, so the game
+   stays responsive on the deep tiers.
 6. A candidate is accepted only when its deterministic closure reaches the
    tier floor and every enclosed pocket of hidden cells the reveal created
    is fully deducible. If either check fails, the freshly committed chunks
@@ -150,13 +150,15 @@ table that answers `isMine` for the loss screen). The main thread keeps
 input, animation and paint, so a generation search costs the reveal ripple
 no frame at all. A reveal is searched on the engine thread first with a
 short budget, which answers the common case with no thread hand-off at
-all (about 20 ms on Insane, growing toward 150 ms as a long session
-widens the board, because the solver rebuilds its constraints per
-deduction step); only a search that fails within it hands the
-remaining attempts to a pool of search workers, where each slot
+all (typically 9-20 ms on Insane); only a search that fails within it
+hands the remaining attempts to a pool of search workers, where each slot
 reconstructs the board state and searches its own stride of the attempt
 space, so a hard reveal costs the wall time of one search no matter how
-many candidates it takes. The answer to a reveal is sent before the
+many candidates it takes. Chords and the guess zone's free cell search
+through the same path. A search whose candidates all stall short of the
+tier floor gives up after 40% of its budget - re-rolling cannot repair
+ambiguity that already-committed terrain owns - and delivers the deepest
+closure it saw. The answer to a reveal is sent before the
 precompute of the next one starts, and the precompute searches the same
 pool while the player reads the board, so a click on the prepared cell
 adopts the searched state with no waiting. Every soundness invariant stays

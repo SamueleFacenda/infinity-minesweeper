@@ -65,6 +65,7 @@ class Game {
   private snapshot: EngineSnapshot | null = null;
   private seed = 0;
   private busy = false;
+  private pendingClick: Cell | null = null;
   private fellBack = false;
   private preparedCell: Cell | null = null;
   private readonly leaderboard = new Leaderboard(window.localStorage);
@@ -565,11 +566,26 @@ class Game {
     this.generationMs += Date.now() - started;
     this.elements.generating.classList.add("hidden");
     this.applyOutcome(outcome, this.originOf(request, outcome));
+    // why: the queued click plays against the state the search left
+    // behind, and only the last one is kept so a burst of clicks during a
+    // search can never replay a stale one
+    const queued = this.pendingClick;
+    this.pendingClick = null;
+    // why: clickCell re-checks the state it lands in, so a queued click on
+    // a cell the search already revealed becomes a chord instead
+    if (queued !== null) this.clickCell(queued);
     return outcome;
   }
 
   private clickCell(cell: Cell): void {
-    if (this.busy) return;
+    // why: a search takes a moment on the deep tiers, and a click that
+    // arrives while it runs is queued instead of dropped, so the game
+    // stays responsive and the click is answered against the state the
+    // search leaves behind, exactly as if it had arrived after it
+    if (this.busy) {
+      this.pendingClick = cell;
+      return;
+    }
     if (this.view.status !== "playing") return;
     const request: EngineAction = this.view.isRevealed(cell.x, cell.y)
       ? { kind: "chord", x: cell.x, y: cell.y }

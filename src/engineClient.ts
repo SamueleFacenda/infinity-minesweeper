@@ -160,15 +160,17 @@ export class LocalEngineClient implements EngineClient {
       gameId: this.gameId,
       request,
     };
-    let outcome: EngineOutcome | null = null;
-    for (const reply of handleEngineMessage(this.session, message)) {
-      outcome = this.dispatch(reply);
-    }
-    // why: the precompute is sliced on a timer here too, so a fallback run
-    // never blocks the main thread on a deep-tier search
-    startPrepare(this.session);
-    this.schedulePrepareSlice();
-    return Promise.resolve(outcome);
+    return handleEngineMessage(this.session, message).then((replies) => {
+      let outcome: EngineOutcome | null = null;
+      for (const reply of replies) {
+        outcome = this.dispatch(reply);
+      }
+      // why: the precompute is sliced on a timer here too, so a fallback
+      // run never blocks the main thread on a deep-tier search
+      startPrepare(this.session, this.gameId);
+      this.schedulePrepareSlice();
+      return outcome;
+    });
   }
 
   newGame(seed: number, density: number): Promise<EngineOutcome | null> {

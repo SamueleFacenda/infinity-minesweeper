@@ -269,6 +269,49 @@ describe("engine handler", () => {
     assertViewParity(adopted, view);
   });
 
+  // why: a chord whose flags satisfy the count must open every one of its
+  // unknowns, not a subset of them
+  it("opens every unknown of a satisfied chord", async () => {
+    const session: EngineSession = { board: null };
+    await send(session, { kind: "new", seed: 7, density: 0.22 });
+    await send(session, { kind: "reveal", x: 0, y: 0 });
+    const board = session.board;
+    if (board === null) throw new Error("session has no board");
+    let chorded = false;
+    for (let step = 0; step < 60 && !chorded; step++) {
+      const hint = board.findHint();
+      if (hint === null) break;
+      await send(session, { kind: "reveal", x: hint.x, y: hint.y });
+      const target = chordableNumber(board);
+      if (target === null) continue;
+      for (const [mx, my] of target.mines) {
+        await send(session, { kind: "flag", x: mx, y: my });
+      }
+      const before = board.revealedCount;
+      const replies = await send(session, {
+        kind: "chord",
+        x: target.x,
+        y: target.y,
+      });
+      const snapshot = stateSnapshot(replies);
+      expect(snapshot.status).toBe("playing");
+      const gained = snapshot.revealed.size - before;
+      expect(
+        gained,
+        `chord (${String(target.x)},${String(
+          target.y,
+        )}) opened ${String(gained)} of ${String(
+          target.safeUnknown.length,
+        )} unknown cells`,
+      ).toBeGreaterThanOrEqual(target.safeUnknown.length);
+      for (const [ux, uy] of target.safeUnknown) {
+        expect(board.isRevealed(ux, uy)).toBe(true);
+      }
+      chorded = true;
+    }
+    expect(chorded).toBe(true);
+  }, 60_000);
+
   // why: with a pool the reveal is searched in worker slots and the winner
   // is adopted wholesale, so the engine path must produce the same
   // consistent board the single-threaded search produces
@@ -384,6 +427,34 @@ function findHiddenMine(board: Board) {
     for (const [nx, ny] of neighborCoords(x, y)) {
       if (board.isRevealed(nx, ny) || board.isFlagged(nx, ny)) continue;
       if (board.isMine(nx, ny)) return { x: nx, y: ny };
+    }
+  }
+  return null;
+}
+
+// A number whose unknowns hold exactly its count of mines and at least two
+// safe cells, so flagging the mines satisfies it and a chord must open the
+// rest.
+function chordableNumber(board: Board): {
+  x: number;
+  y: number;
+  mines: readonly [number, number][];
+  safeUnknown: readonly [number, number][];
+} | null {
+  for (const [key, count] of board.revealedView) {
+    if (count < 1 || count > 4) continue;
+    const comma = key.indexOf(",");
+    const x = Number(key.slice(0, comma));
+    const y = Number(key.slice(comma + 1));
+    const mines: [number, number][] = [];
+    const safeUnknown: [number, number][] = [];
+    for (const [nx, ny] of neighborCoords(x, y)) {
+      if (board.isRevealed(nx, ny) || board.isFlagged(nx, ny)) continue;
+      if (board.isMine(nx, ny)) mines.push([nx, ny]);
+      else safeUnknown.push([nx, ny]);
+    }
+    if (mines.length === count && safeUnknown.length >= 2) {
+      return { x, y, mines, safeUnknown };
     }
   }
   return null;

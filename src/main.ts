@@ -57,6 +57,13 @@ interface Elements {
   generating: HTMLElement;
 }
 
+// why: a search takes a moment on the deep tiers, so input that arrives
+// while one runs is held and answered in order against the state the
+// search leaves behind, exactly as if it had arrived after it
+type PendingAction =
+  | { readonly kind: "click"; readonly cell: Cell }
+  | { readonly kind: "action"; readonly request: EngineAction };
+
 class Game {
   private client: EngineClient;
   private view: SnapshotView;
@@ -65,6 +72,7 @@ class Game {
   private snapshot: EngineSnapshot | null = null;
   private seed = 0;
   private busy = false;
+  private pending: PendingAction[] = [];
   private fellBack = false;
   private preparedCell: Cell | null = null;
   private readonly leaderboard = new Leaderboard(window.localStorage);
@@ -353,14 +361,14 @@ class Game {
   }
 
   private onPrimary(cell: Cell): void {
-    if (this.busy) return;
+    // why: a click during a search is held by clickCell and answered
+    // after it, so the handler never drops input
     if (this.view.isRevealed(cell.x, cell.y)) this.clickCell(cell);
     else if (this.flagFirst) this.toggleFlagAt(cell);
     else this.clickCell(cell);
   }
 
   private onSecondary(cell: Cell): void {
-    if (this.busy) return;
     if (this.flagFirst) this.clickCell(cell);
     else this.toggleFlagAt(cell);
   }
@@ -376,7 +384,8 @@ class Game {
   }
 
   private toggleFlagAt(cell: Cell): void {
-    if (this.busy) return;
+    // why: a flag during a search is held by submit and answered after it,
+    // so the handler never drops input
     if (this.view.status !== "playing") return;
     void this.submit({ kind: "flag", x: cell.x, y: cell.y });
   }
@@ -549,7 +558,13 @@ class Game {
   // stopped while it answers, then replay the result the way the
   // synchronous version did.
   private async submit(request: EngineAction): Promise<EngineOutcome | null> {
-    if (this.busy || this.view.status !== "playing") return null;
+    if (this.view.status !== "playing") return null;
+    if (this.busy) {
+      // why: the click is answered after the search, against the state it
+      // leaves behind, instead of being dropped
+      this.enqueue({ kind: "action", request });
+      return null;
+    }
     this.busy = true;
     const prepared = this.preparedCell;
     // why: the cache belongs to the state this request leaves behind, so it
@@ -565,11 +580,37 @@ class Game {
     this.generationMs += Date.now() - started;
     this.elements.generating.classList.add("hidden");
     this.applyOutcome(outcome, this.originOf(request, outcome));
+    // why: the held input plays in order against the state the search left
+    // behind, one at a time, so a burst during a search is answered
+    // exactly as if each action had arrived after the one before it
+    const queued = this.pending.shift();
+    // why: a held click re-checks the state it lands in, so a click on a
+    // cell the search already revealed becomes a chord instead
+    if (queued !== undefined) this.play(queued);
     return outcome;
   }
 
+  private enqueue(action: PendingAction): void {
+    // why: a player cannot outpace a search by more than a few actions,
+    // and an unbounded queue would replay a burst long after it happened
+    if (this.pending.length >= 32) this.pending.shift();
+    this.pending.push(action);
+  }
+
+  private play(action: PendingAction): void {
+    if (action.kind === "click") this.clickCell(action.cell);
+    else void this.submit(action.request);
+  }
+
   private clickCell(cell: Cell): void {
-    if (this.busy) return;
+    // why: a search takes a moment on the deep tiers, and a click that
+    // arrives while it runs is held instead of dropped, so the game stays
+    // responsive and the click is answered against the state the search
+    // leaves behind, exactly as if it had arrived after it
+    if (this.busy) {
+      this.enqueue({ kind: "click", cell });
+      return;
+    }
     if (this.view.status !== "playing") return;
     const request: EngineAction = this.view.isRevealed(cell.x, cell.y)
       ? { kind: "chord", x: cell.x, y: cell.y }
@@ -769,6 +810,8 @@ class Game {
     }
     this.busy = false;
     this.preparedCell = null;
+    // why: a fresh board makes input held against the old one stale
+    this.pending = [];
     this.snapshot = null;
     this.seed = this.newSeed();
     const outcome = await this.client.newGame(

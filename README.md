@@ -16,11 +16,12 @@ sound, theming, and a local leaderboard.
 - **Infinite board** - the grid extends without limit in every direction;
   mine placement is a pure hash function of seed and coordinates, so
   nothing is stored until you explore it
-- **No guessing** - after every reveal the solver verifies that a certain
-  move exists and that no enclosed pocket of hidden cells is
-  unresolvable; terrain that would dead-end is re-rolled, and the rare
-  positions no re-roll can rescue are marked as guess zones instead of
-  hidden or resolved by force
+- **No guessing** - after every reveal the solver plays the position's
+  deterministic closure forward and requires it to reach a per-tier depth
+  with no enclosed pocket of hidden cells left unresolvable; terrain that
+  would dead-end sooner is re-rolled, and the rare positions no re-roll
+  can rescue are marked as guess zones instead of hidden or resolved by
+  force
 - **Deterministic solving aids** - a Hint button (or `H`) highlights a
   cell that is provably safe right now, and a Free cell button (or `F`)
   opens one guaranteed-safe cell of a marked guess zone, so a run never
@@ -111,25 +112,28 @@ only custom boards and "evil" no-guess modes like minesweeper.online's
    the moment the numbers are shown.
 4. Every reveal plays out tentatively. The first attempt is the honest
    outcome - an explosion there ends the run. Later attempts re-roll the
-   freshly committed chunks inside a per-tier budget (50 ms on Easy up to
-   900 ms on Insane) and keep the candidate whose deterministic chain runs
-   deepest instead of the first acceptable one; the opening reveal also
-   requires a playout 25 to 60 moves deep, scaled by density, so every
-   game starts on terrain that stays solvable well past the first moves.
-   Generation can take up to about a second on Insane, so a "Generating
-   board..." indicator paints first and the run clock stops while it runs.
-5. The next reveal is searched ahead of the click. After every reveal the
-   game asks the board for its next target - the certain move, or the free
-   cell of a marked zone - and searches that reveal in the engine thread,
-   with twice the interactive budget. A click that lands on the prepared
-   cell adopts the searched state directly: no indicator, no waiting, and
-   the search happens while the player reads the board rather than while
-   they wait on it. Any click still works; a click somewhere else simply
-   pays the interactive search as before.
-6. A candidate is accepted only when the position it produces holds at
-   least one provably safe cell and every enclosed pocket of hidden cells
-   the reveal created is fully deducible. If either check fails, the
-   freshly committed chunks re-roll.
+   freshly committed chunks inside a per-tier budget (400 ms on Easy up to
+   1.5 s on Insane) and keep the candidate whose deterministic closure
+   runs deepest. A closure is played by taking every certain move until
+   deduction stalls, and acceptance requires it to reach a per-tier floor:
+   25 to 30 moves on the easy tiers, 120/80 on the tiers below Insane and
+   150/100 on Insane itself, so every game starts on terrain that stays
+   deterministic far past the first moves instead of merely past them.
+   Generation can take up to about a second and a half on Insane, so a
+   "Generating board..." indicator paints first and the run clock stops
+   while it runs.
+5. Every certain move is searched ahead of the click. After every reveal
+   the game searches each move the solver can prove - the hint first - in
+   the engine thread, so a click on any prepared cell adopts the searched
+   state directly: no indicator, no waiting, and the search happens while
+   the player reads the board rather than while they wait on it. Any click
+   still works; a click somewhere else pays the interactive search. A click
+   that arrives while a search runs is queued, not dropped, so the game
+   stays responsive on the deep tiers.
+6. A candidate is accepted only when its deterministic closure reaches the
+   tier floor and every enclosed pocket of hidden cells the reveal created
+   is fully deducible. If either check fails, the freshly committed chunks
+   re-roll.
 7. When re-rolling cannot repair ambiguity that already-committed terrain
    created, the honest layout stands and the ambiguous cells are
    **marked**: the HUD shows "Guess zone: N cells", those cells carry a
@@ -139,17 +143,28 @@ only custom boards and "evil" no-guess modes like minesweeper.online's
    and never opens cells you did not click.
 8. Hint runs the same solver and highlights its next certain move.
 
-The engine - board, generator and solver - runs in a single Web Worker and
+The engine - board, generator and solver - runs in a Web Worker and
 answers requests with snapshots: a read-only copy of what the renderer and
 the HUD need (revealed counts, flags, the marked zone, plus the terrain
 table that answers `isMine` for the loss screen). The main thread keeps
-input, animation and paint, so a generation search of up to a second on
-Insane costs the reveal ripple no frame at all. The answer to a reveal is
-sent before the precompute of the next one starts, and the precompute runs
-in bounded slices that yield to the next request, so a click never waits
-behind it. Every soundness invariant stays inside the engine; only the
-view crosses. Where module workers are unavailable the same engine runs
-in-process with the same sliced precompute.
+input, animation and paint, so a generation search costs the reveal ripple
+no frame at all. A reveal is searched on the engine thread first with a
+short budget, which answers the common case with no thread hand-off at
+all (typically 9-20 ms on Insane); only a search that fails within it
+hands the remaining attempts to a pool of search workers, where each slot
+reconstructs the board state and searches its own stride of the attempt
+space, so a hard reveal costs the wall time of one search no matter how
+many candidates it takes. Chords and the guess zone's free cell search
+through the same path. A search whose candidates all stall short of the
+tier floor gives up after 40% of its budget - re-rolling cannot repair
+ambiguity that already-committed terrain owns - and delivers the deepest
+closure it saw. The answer to a reveal is sent before the
+precompute of the next one starts, and the precompute searches the same
+pool while the player reads the board, so a click on the prepared cell
+adopts the searched state with no waiting. Every soundness invariant stays
+inside the engine; only the view crosses. Where module workers are
+unavailable the same engine runs in-process with the same search and the
+same sliced precompute.
 
 The solver propagates per-cell mine bounds (lower and upper) across the
 whole frontier until they stop tightening, then enumerates small
